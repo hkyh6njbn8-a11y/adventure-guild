@@ -1,11 +1,11 @@
-// sharedMemory.cjs — 冒险公会 ↔ 共享项目记忆库（公共漏斗库）打通模块
+// sharedMemory.cjs — 冒险公会 ↔ 共享项目记忆库打通模块
 //
-// 背景：所有 AI 共享的项目记忆在 D:\MemoryBank\公共漏斗库（公共漏斗记忆库）。
+// 背景：所有 AI 共享的项目记忆库（路径由 config.integrations.sharedMemoryDir 或环境变量 SHARED_MEMORY_DIR 配置，未配置则禁用）。
 //       冒险公会本地的 memories 表只是本系统内部记录；要让"不管哪个 AI 进来看板
-//       都自带项目上下文"，必须读写公共库。
+//       都自带项目上下文"，必须读写共享记忆库。
 //
-// 规则（主理人拍板，必须遵守）：
-//   - 写入：一律走公共库的 memory.mjs 标准工具（自动查重/归档 L0/L1），
+// 规则（重要，必须遵守）：
+//   - 写入：一律走共享库的 memory.mjs 标准工具（自动查重/归档），
 //     禁止直接拼 SQL 写公共库。
 //   - 读取：直接只读查询（更快，与 memory.mjs search 同一逻辑），无副作用。
 //
@@ -56,10 +56,10 @@ function archiveLog(content, who) {
 
 // 项目识别：公共库记忆没有统一项目字段，用 tags/title/content 关键词映射到项目
 const PROJECTS = [
-  { key: 'zhaoxi', name: '朝夕', kws: ['zhaoxi', '朝夕'] },
+  { key: 'zhaoxi', name: '项目A', kws: ['zhaoxi'] },
   { key: 'guild',  name: '冒险公会', kws: ['冒险', '公会', 'quest', '任务看板'] },
   { key: 'tool',   name: '工具链', kws: ['tool', '工具'] },
-  { key: 'zaima',  name: '在么在么', kws: ['在么', 'zaimozaime'] },
+  { key: 'zaima',  name: '项目B', kws: ['zaima', 'zaimozaime'] },
 ];
 function projectOf(title, content, tags) {
   const hay = String(title || '') + ' ' + String(content || '') + ' ' + String(tags || '');

@@ -104,7 +104,7 @@ const DIRECTOR_HANDLERS = {
   search_memories(args) {
     const kw = String(args.keyword || '').trim();
     const limit = Math.min(parseInt(args.limit, 10) || 8, 20);
-    // 双库搜索：共享项目记忆库（公共漏斗库，所有 AI 共用）优先，再补本地库
+    // 双库搜索：共享项目记忆库（路径可配置）优先，再补本地库
     const shared = sharedMemory.search(kw, limit);
     let sql = "SELECT type,title,content,importance,created_at FROM memories WHERE (title LIKE ? OR content LIKE ? OR tags LIKE ?) AND status='active'";
     const p = [`%${kw}%`, `%${kw}%`, `%${kw}%`];

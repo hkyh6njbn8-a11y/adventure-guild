@@ -1,5 +1,5 @@
 // migrate_legacy.cjs — 冒险公会：任务看板 旧库数据迁移工具（全表迁移）
-// 功能：把旧「公共漏斗库」memory.db 的任务相关表（tasks / task_scores / agents / memories）
+// 功能：把旧「共享记忆库」memory.db 的任务相关表（tasks / task_scores / agents / memories）
 //       全部迁移到产品独立数据目录的数据库，不丢失历史数据，源库只读不修改。
 // 用法：
 //   node migrate/migrate_legacy.cjs                       # 使用默认源路径
@@ -12,7 +12,7 @@ const Database = require('better-sqlite3');
 const { openDb, ensureSchema } = require('../src/lib/db.cjs');
 const { DB_PATH } = require('../src/lib/config.cjs');
 
-const DEFAULT_SRC = 'D:/MemoryBank/公共漏斗库/data/memory.db';
+const DEFAULT_SRC = ''; // 迁移源库路径，默认留空（旧库位置可手动传入：node migrate_legacy.cjs <旧库路径>）
 const SRC = process.argv[2] || DEFAULT_SRC;
 
 const TABLE_ORDER = ['tasks', 'task_scores', 'agents', 'memories'];

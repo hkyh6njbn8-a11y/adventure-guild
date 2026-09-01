@@ -480,7 +480,7 @@ switch (cmd) {
                     VALUES (?, 'work_log', ?, ?, ?, ?, 0.9, 'task_pool', datetime('now','localtime'), datetime('now','localtime'))`
         ).run(randomUUID(), `[工作记录] ${taskId} ${task.title}`, content, tags, imp);
         console.log(`📝 工作记录已归档到记忆库`);
-        // ── 共享项目记忆库打通：同步写公共漏斗库（走 memory.mjs 标准工具，合规）──
+        // ── 共享项目记忆库打通：同步写共享记忆库（走 memory.mjs 标准工具，合规）──
         const who = task.assignee || '未知';
         const shr = sharedMemory.archiveLog(`${content}`, who);
         if (shr.ok) console.log(`📚 工作记录已同步到共享项目记忆库（${who}）`);

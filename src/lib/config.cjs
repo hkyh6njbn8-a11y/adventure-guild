@@ -12,7 +12,7 @@ const fs = require('fs');
 // 产品根目录：本文件位于 <产品根>/src/lib/config.cjs → 上溯两级
 const PRODUCT_ROOT = path.resolve(__dirname, '..', '..');
 
-// 默认配置（与旧系统行为保持一致，仅去掉「朝夕」品牌耦合）
+// 默认配置
 const DEFAULT_CONFIG = {
   app: {
     name: '冒险公会',               // 产品名
@@ -30,9 +30,9 @@ const DEFAULT_CONFIG = {
     defaultPrefix: 'quest',        // 新建任务默认 ID 前缀（未指定且无法推断时）
     allowedPrefixes: ['quest', 'zhaoxi', 'tool', 'fix'], // 看板新建表单可选前缀
     createdByDefault: '工会会长',   // 新建任务默认创建人（角色制，不绑定具体 AI）
-    creatorOptions: ['工会会长', '用户', '冒险者'], // 创建人下拉选项（通用角色，主理人可自定义）
+    creatorOptions: ['工会会长', '用户', '冒险者'], // 创建人下拉选项（通用角色，可自定义）
     projectPrefixMap: {            // 前缀 → 项目名映射（complete 归档工作记录时使用）
-      zhaoxi: '朝夕',
+      zhaoxi: '项目A',
       quest: '任务',
       tool: '工具'
     }
@@ -52,7 +52,7 @@ const DEFAULT_CONFIG = {
     // 记忆集成开关：complete 时自动写工作记录到 memories 表 + 问题闭环标记
     // 数据（memories 表）始终迁移；此开关只控制 complete 的自动写入行为
     memoryArchive: true,
-    // 共享项目记忆库（公共漏斗库）：所有 AI 共用的项目上下文。
+    // 共享项目记忆库（路径可配置，见 SHARED_MEMORY_DIR）：所有 AI 共用的项目上下文。
     // 打通后：搜索读双库（共享优先），完成任务自动写共享库（走其 memory.mjs 标准工具）。
     sharedMemoryDir: 'D:/MemoryBank/公共漏斗库'
   },

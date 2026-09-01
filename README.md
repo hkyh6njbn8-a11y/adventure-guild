@@ -1,8 +1,15 @@
 # 冒险公会：任务看板
 
-多 AI 工人协作任务管理平台 —— 人类总指挥创建任务、审核打分、打回重做；多个 AI 工人从任务池领取任务、执行、提交。独立产品化版本，已从「公共漏斗记忆库 / 朝夕项目」解耦。
+多 AI 协作任务管理平台 —— 任务池分发 + peer 审查 + 项目隔离 + 共享记忆 + 角色化接入。
 
-> **开源说明**：本仓库只含程序代码。**运行数据默认在用户目录 `~/.adventure-guild/`**（任务/评分/执行者/配置，含 API Key），不随仓库分发；共享记忆库（`integrations.sharedMemoryDir`）默认指向本机路径，新部署可留空禁用或指向自己的记忆库。API Key 只填在用户目录的 `config.json`，代码和文档中只有占位符。
+**为什么做这个**：为了白嫖国内各种免费的 AI 工具。豆包、Agnes、DeepSeek、WorkBuddy 这些 AI 各有免费额度，单独用浪费——把它们凑在一起当「冒险者」分工干活，让每个 AI 的免费额度都物尽其用。多 AI 协作不只是炫技，是让免费额度产生 1+1>2 的价值。
+
+- **工会会长**（人类管理员或任命的 AI）创建任务、验收打分、打回重做，只管理不执行
+- **冒险者**（任何 AI 工人）从任务池领取任务、执行、提交，一段提示词即可接入
+- 任务提交后进入「待审查」，审查员通过才完成（peer review），不合格打回重做
+- 项目级数据隔离（按任务前缀/记忆关键词归属项目），共享记忆库打通（换 AI 不丢上下文）
+
+> **开源说明**：本仓库只含程序代码。**运行数据默认存于用户目录 `~/.adventure-guild/`**（任务/评分/执行者/配置，含 API Key），不随仓库分发。共享记忆库通过 `integrations.sharedMemoryDir` 或环境变量 `SHARED_MEMORY_DIR` 配置，未配置则自动禁用该功能。API Key 只填在用户目录的 `config.json`，代码和文档中只有占位符。
 
 ## 快速开始
 
@@ -86,9 +93,9 @@ D:\冒险公会\
   "tasks": {
     "defaultPrefix": "quest",
     "allowedPrefixes": ["quest", "zhaoxi", "tool", "fix"],
-    "createdByDefault": "总指挥",
-    "creatorOptions": ["总指挥", "用户", "AgnesCode", "WorkBuddy (GLM-5.3-Flash)"],
-    "projectPrefixMap": { "zhaoxi": "朝夕", "quest": "任务", "tool": "工具" }
+    "createdByDefault": "工会会长",
+    "creatorOptions": ["工会会长", "用户", "冒险者"],
+    "projectPrefixMap": { "zhaoxi": "项目A", "quest": "任务", "tool": "工具" }
   },
   "scoring": {
     "min": 1, "max": 4,
@@ -114,10 +121,8 @@ D:\冒险公会\
 
 > `scoring.dimensions`：评分维度名称和范围可配置，key 固定（completion/quality/verification/record）。
 > `integrations.memoryArchive`：完成任务时是否自动写工作记录 + 问题闭环（记忆集成开关）。
-> `integrations.sharedMemoryDir`：共享项目记忆库路径（默认 `D:/MemoryBank/公共漏斗库`）。打通后：任务完成自动同步工作日志到共享库（走其 `memory.mjs` 标准工具，自动查重/归档）；搜索双库合并；看板「📚 项目记忆」视图可浏览/搜索。外部 AI 也可直接调 `GET /api/memory?kw=&limit=` 查项目上下文。
+> `integrations.sharedMemoryDir`：共享项目记忆库路径（可通过环境变量 `SHARED_MEMORY_DIR` 覆盖，未配置则禁用）。打通后：任务完成自动同步工作日志到共享库；搜索双库合并；看板「📚 项目记忆」视图可浏览/搜索。外部 AI 也可直接调 `GET /api/memory?kw=&limit=` 查项目上下文。
 > `ai`：内置 AI 项目管理。`apiKey` 为 OpenAI 兼容 API Key，`directorModel` 为总指挥拆解模型、`workerModel` 为工人执行模型，`maxTasks` 为单次拆解最多子任务数，`workerPrefix` 为 AI 派发任务的 ID 前缀。API Key 只存本地 config.json，看板 API 返回时自动打码。
->
-> **当前实例实际配置**（`~/.adventure-guild/config.json`）：`baseUrl = https://api.agnes-ai.cn/v1`，`directorModel = agnes-2.5-flash`（总指挥），`workerModel = deepseek-v4-flash-ga-260731`（工人），`autoRun = false`（后台自主运行已关闭）。总指挥/会长由主理人任命的 AI 担任（上岗提示词见 `docs/LEADER_PROTOCOL.md`，不固定、可轮换）。
 
 ## CLI 用法
 
@@ -207,7 +212,7 @@ node src\ai.mjs work --once [--assignee "AI名称"] [--workspace 工作区]
 
 ## 全自主 AI 助手（对话式 + 目标驱动，Phase 7）
 
-> ⚠️ 看板界面已于 2026-09-02 移除「💬 AI 助手」页（主理人拍板）；以下后端 API 与能力**保留**，供外部 AI / 命令行调用（`node src\ai.mjs` 或 HTTP API）。总指挥的角色化接入提示词见 `docs/LEADER_PROTOCOL.md`。
+> ⚠️ 看板界面已于 2026-09-02 移除「💬 AI 助手」页；以下后端 API 与能力**保留**，供外部 AI / 命令行调用（`node src\ai.mjs` 或 HTTP API）。总指挥的角色化接入提示词见 `docs/LEADER_PROTOCOL.md`。
 
 - **🎯 目标 / 项目管理**：可新建多个目标（如"优化冒险公会""做一个待办清单应用"），每个目标独立分配任务前缀。总指挥 AI 自动把目标拆成任务发布到任务池，等待外部 AI 工人领取执行，直到完成。
 - **▶ 开始 / ⏸ 暂停 / ✔ 完成**：每个目标可随时暂停（停止派活、保留进度）或恢复运行；也可手动标记完成。多项目并行推进互不干扰。
@@ -219,7 +224,7 @@ node src\ai.mjs work --once [--assignee "AI名称"] [--workspace 工作区]
   - **自主创建**：发现明显缺口 → 自动补建任务
   - 巡查只对「失败」任务做处置决策，不擅自动正常任务；能救就救（先重置后取消）。
 - **超时自动解卡**：进行中超过 `ai.staleMinutes`（默认 30 分钟）的任务视为卡住，调度器自动释放回待领取（应对 worker 窗口/进程中断）。
-- **能读记忆库（双库）**：总指挥可 `search_memories` 搜索**共享项目记忆库**（公共漏斗库 `D:\MemoryBank\公共漏斗库`，所有 AI 共用）+ 本地记忆库，结果标注来源（共享/本地）。任何 AI 接手任务前都应先搜记忆了解项目上下文。
+- **能读记忆库（双库）**：总指挥可 `search_memories` 搜索**共享项目记忆库**（路径由 `integrations.sharedMemoryDir` / 环境变量 `SHARED_MEMORY_DIR` 配置，未配置则跳过）+ 本地记忆库，结果标注来源（共享/本地）。任何 AI 接手任务前都应先搜记忆了解项目上下文。
 - **对话补充**：也可以直接和 AI 对话设定目标、追问进度；多轮会话记住上下文。
 
 > **总指挥模型**：默认用火山方舟 `deepseek-v4-flash-ga-260731`，也可换成其他 OpenAI 兼容模型（如 Agnes `agnes-2.5-flash`）——在设置页或 `config.json` 的 `ai.directorModel` 配置。
@@ -276,13 +281,13 @@ node migrate\migrate_legacy.cjs "D:\path\to\old.db"  # 指定旧库
 
 ## 从旧系统切换
 
-- 旧系统（公共漏斗库）看板仍占用端口 8765；启动新产品前，请先停止旧看板服务（释放端口），或在 `config.json` 改端口。
+- 旧系统（历史版本）看板可能仍占用端口 8765；启动新产品前，请先停止旧看板服务（释放端口），或在 `config.json` 改端口。
 - 迁移完成后，**以新产品数据目录为准**（`~/.adventure-guild/data/memory.db`）；旧库保持只读作备份。
 - 旧库中实时新增的任务，重新运行一次迁移工具即可增量合并（按唯一键去重）。
 
 ## 路线图
 
-见 `D:\MemoryBank\公共漏斗库\产品化路线图.md`：
+已完成里程碑：
 - Phase 0 ✅ 解耦独立
 - Phase 1 ✅ 多工作区/多项目
 - Phase 2 ✅ UI/UX 产品化（纯色简洁主题 + 三视图 + 详情抽屉 + 打分面板）

@@ -149,11 +149,11 @@ function getData(workspace, project) {
   const topProjRows = (wsId
     ? db.prepare(`
         SELECT t.assignee,
-               CASE WHEN t.task_id LIKE 'zhaoxi-%' THEN '朝夕'
+               CASE WHEN t.task_id LIKE 'zhaoxi-%' THEN '项目A'
                     WHEN t.task_id LIKE 'tool-%' THEN '工具链'
                     WHEN t.task_id LIKE 'quest-%' OR t.task_id LIKE 'ai-%' OR t.task_id LIKE 'opt-%'
                       OR t.task_id LIKE 'g001-%' OR t.task_id LIKE 'g003-%' OR t.task_id LIKE 'fix-%' THEN '冒险公会'
-                    WHEN t.task_id LIKE 'zaima-%' OR t.task_id LIKE 'zaimozaime-%' THEN '在么在么'
+                    WHEN t.task_id LIKE 'zaima-%' OR t.task_id LIKE 'zaimozaime-%' THEN '项目B'
                     ELSE '其他' END proj, COUNT(*) c
         FROM tasks t
         WHERE t.status='completed' AND t.assignee IS NOT NULL AND t.assignee != '' AND t.workspace_id = ?${pj.sql}
@@ -161,11 +161,11 @@ function getData(workspace, project) {
       `).all(wsId, ...pj.params)
     : db.prepare(`
         SELECT t.assignee,
-               CASE WHEN t.task_id LIKE 'zhaoxi-%' THEN '朝夕'
+               CASE WHEN t.task_id LIKE 'zhaoxi-%' THEN '项目A'
                     WHEN t.task_id LIKE 'tool-%' THEN '工具链'
                     WHEN t.task_id LIKE 'quest-%' OR t.task_id LIKE 'ai-%' OR t.task_id LIKE 'opt-%'
                       OR t.task_id LIKE 'g001-%' OR t.task_id LIKE 'g003-%' OR t.task_id LIKE 'fix-%' THEN '冒险公会'
-                    WHEN t.task_id LIKE 'zaima-%' OR t.task_id LIKE 'zaimozaime-%' THEN '在么在么'
+                    WHEN t.task_id LIKE 'zaima-%' OR t.task_id LIKE 'zaimozaime-%' THEN '项目B'
                     ELSE '其他' END proj, COUNT(*) c
         FROM tasks t
         WHERE t.status='completed' AND t.assignee IS NOT NULL AND t.assignee != ''${pj.sql}

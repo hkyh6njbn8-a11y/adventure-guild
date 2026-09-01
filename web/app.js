@@ -291,10 +291,10 @@ function renderFilterChips(d) {
 // 项目切换器（固定项目选项，全数据隔离）
 const PROJECT_OPTIONS = [
   { key: 'all', label: '🌐 全部项目' },
-  { key: 'zhaoxi', label: '朝夕' },
+  { key: 'zhaoxi', label: '项目A' },
   { key: 'guild', label: '冒险公会' },
   { key: 'tool', label: '工具链' },
-  { key: 'zaima', label: '在么在么' },
+  { key: 'zaima', label: '项目B' },
   { key: 'other', label: '其他' },
 ];
 function renderProjectSelect() {
