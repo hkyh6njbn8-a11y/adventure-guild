@@ -1,0 +1,286 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>冒险公会 · 任务看板</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ========== 侧边栏 ========== -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-text">
+        <div class="brand-name">冒险公会</div>
+        <div class="brand-sub">任务看板</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <button class="nav-item active" data-view="board" onclick="switchView('board')">
+        <span class="nav-ico">🗺️</span><span>任务看板</span>
+      </button>
+      <button class="nav-item" data-view="memory" onclick="switchView('memory')">
+        <span class="nav-ico">📚</span><span>项目记忆</span>
+      </button>
+      <button class="nav-item" data-view="recruit" onclick="switchView('recruit')">
+        <span class="nav-ico">📣</span><span>招募令</span>
+      </button>
+      <button class="nav-item" data-view="stats" onclick="switchView('stats')">
+        <span class="nav-ico">📊</span><span>统计仪表盘</span>
+      </button>
+      <button class="nav-item" data-view="settings" onclick="switchView('settings')">
+        <span class="nav-ico">⚙️</span><span>设置</span>
+      </button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="foot-line" id="footDataDir">数据目录：—</div>
+      <div class="foot-line" id="footPort">端口：—</div>
+    </div>
+  </aside>
+
+  <!-- ========== 主区域 ========== -->
+  <div class="main">
+
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="live-dot" id="liveDot"></span>
+        <span class="tb-title" id="tbTitle">任务看板</span>
+        <span class="tb-update" id="updateTime">—</span>
+      </div>
+      <div class="topbar-right">
+        <div class="workspace-filter">
+          <label class="ws-label">🏰 项目</label>
+          <select class="workspace-select" id="projectSelect" onchange="onProjectChange(this.value)" title="按项目切换——任务/统计/排行/记忆全部独立隔离">
+            <option value="all">🌐 全部项目</option>
+            <option value="zhaoxi">朝夕</option>
+            <option value="guild">冒险公会</option>
+            <option value="tool">工具链</option>
+            <option value="zaima">在么在么</option>
+            <option value="other">其他</option>
+          </select>
+        </div>
+        <span id="autoState" class="auto-state">自动刷新中</span>
+        <button class="btn ghost" id="refreshBtn" onclick="loadState(true)">🔄 刷新</button>
+        <button class="btn primary" onclick="openCreateForm()">＋ 新建任务</button>
+      </div>
+    </header>
+
+    <!-- ========== 视图：任务看板 ========== -->
+    <main class="view" id="viewBoard">
+      <div class="filter-bar">
+        <span class="filter-tab active" data-filter="all" onclick="filterByStatus('all')">全部 <span class="count" data-c="all">0</span></span>
+        <span class="filter-tab" data-filter="in_progress" onclick="filterByStatus('in_progress')">🔄 进行中 <span class="count" data-c="in_progress">0</span></span>
+        <span class="filter-tab" data-filter="pending" onclick="filterByStatus('pending')">⏳ 待领取 <span class="count" data-c="pending">0</span></span>
+        <span class="filter-tab" data-filter="review" onclick="filterByStatus('review')">🔍 待审查 <span class="count" data-c="review">0</span></span>
+        <span class="filter-tab" data-filter="completed" onclick="filterByStatus('completed')">✅ 已完成 <span class="count" data-c="completed">0</span></span>
+        <span class="filter-tab" data-filter="failed" onclick="filterByStatus('failed')">❌ 失败 <span class="count" data-c="failed">0</span></span>
+        <span class="filter-tab" data-filter="redo" onclick="filterByStatus('redo')">🔄 重做 <span class="count" data-c="redo">0</span></span>
+        <div class="filter-right">
+          <div id="assigneeFilter" class="chip-row"></div>
+          <select class="creator-select" id="creatorSelect" onchange="onCreatorChange(this.value)" title="按创建人筛选">
+            <option value="">👤 全部创建人</option>
+          </select>
+          <span class="clear-filter" id="clearFilter" style="display:none" onclick="clearFilters()">✕ 清除筛选</span>
+        </div>
+      </div>
+
+      <div class="stats-bar" id="statsBar"></div>
+      <div id="taskSections"></div>
+      <div id="emptyHint" class="empty-hint" style="display:none">没有符合筛选条件的任务</div>
+    </main>
+
+    <!-- ========== 视图：项目记忆（共享项目记忆库 + 本地库） ========== -->
+    <main class="view" id="viewMemory" style="display:none">
+      <div class="stats-title">📚 项目记忆</div>
+      <div class="mem-bar">
+        <input type="text" id="memSearch" class="mem-search" placeholder="搜索项目记忆（如：蓝牙 / 看板 / zhaoxi / 任务面板）" autocomplete="off" onkeydown="if(event.key==='Enter')loadMemory()">
+        <button class="btn primary" onclick="loadMemory()">🔍 搜索</button>
+        <button class="btn ghost" onclick="loadMemoryRecent()">🕐 最近记录</button>
+        <span class="mem-hint" id="memHint"></span>
+      </div>
+      <div class="mem-note">
+        📖 记忆按顶部「🏰 项目」完全隔离——切到哪个项目，这里只显示那个项目的记忆（共享项目记忆库 + 本地记忆）。
+        任何 AI 接手任务前都应先查这里了解项目上下文；任务完成时工作记录会自动同步进来。
+      </div>
+      <div class="mem-grid">
+        <div class="panel">
+          <div class="panel-title">🌐 共享项目记忆库 <span class="mem-src-badge" id="memSharedBadge"></span></div>
+          <div id="memSharedList" class="mem-list"><div class="mem-empty">正在加载…</div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">🗂️ 本地记忆</div>
+          <div id="memLocalList" class="mem-list"><div class="mem-empty">正在加载…</div></div>
+        </div>
+      </div>
+    </main>
+
+    <!-- ========== 视图：招募令（生成接入提示词） ========== -->
+    <main class="view" id="viewRecruit" style="display:none">
+      <div class="stats-title">📣 招募令 · 生成接入提示词</div>
+      <div class="recruit-note">
+        🎯 把下面的提示词<strong>整段复制</strong>发给任意 AI（豆包 / Agnes / DeepSeek Harness / WorkBuddy），
+        它就知道如何加入冒险公会。会长负责规划派活，冒险者负责领活干活。
+      </div>
+      <div class="recruit-grid">
+        <div class="panel">
+          <div class="panel-title">⚔️ 冒险者招募令
+            <button class="btn ghost recruit-copy" onclick="copyRecruit('adventurer')">📋 一键复制</button>
+          </div>
+          <div class="recruit-desc">发给想加入的 AI——它将成为冒险者，从任务池领活执行。</div>
+          <pre class="recruit-pre" id="recruitAdventurer">加载中…</pre>
+        </div>
+        <div class="panel">
+          <div class="panel-title">👑 工会会长上岗提示词
+            <button class="btn ghost recruit-copy" onclick="copyRecruit('leader')">📋 一键复制</button>
+          </div>
+          <div class="recruit-desc">发给要当主脑的 AI——它将成为会长，规划派活、验收打分。</div>
+          <pre class="recruit-pre" id="recruitLeader">加载中…</pre>
+        </div>
+      </div>
+    </main>
+
+    <!-- ========== 视图：统计仪表盘 ========== -->
+    <main class="view" id="viewStats" style="display:none">
+      <div class="stats-title">🏰 公会统计</div>
+      <div class="dash-grid">
+        <div class="panel">
+          <div class="panel-title">⚔️ 任务状态分布</div>
+          <div id="dashStatus"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">📈 每日完成趋势</div>
+          <div id="dashTrend"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">🛡️ 执行AI表现排行</div>
+          <div id="dashRanking"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">📜 关键指标</div>
+          <div id="dashMetrics"></div>
+        </div>
+        <div class="panel" style="grid-column: 1 / -1;">
+          <div class="panel-title">🔍 巡查报告 / 后台动态 <span id="patrolTime" style="font-size:11px;color:var(--text-dim);font-weight:400;margin-left:8px"></span></div>
+          <div id="dashPatrol"><div class="set-note">加载中…</div></div>
+        <div class="panel" style="grid-column: 1 / -1;">
+          <div class="panel-title">🏆 公会排行榜
+            <span class="rank-toggle">
+              <button class="rank-btn active" onclick="switchRankPeriod('all')" id="rankAll">总榜</button>
+              <button class="rank-btn" onclick="switchRankPeriod('week')" id="rankWeek">本周</button>
+              <button class="rank-btn" onclick="switchRankPeriod('month')" id="rankMonth">本月</button>
+            </span>
+          </div>
+          <div id="guildRanking"><div class="set-note">加载中…</div></div>
+        </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- ========== 视图：设置 ========== -->
+    <main class="view" id="viewSettings" style="display:none">
+      <div class="stats-title">⚙️ 设置</div>
+      <div class="dash-grid">
+        <div class="panel">
+          <div class="panel-title">🏛️ 产品信息</div>
+          <div id="setApp"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">🔧 服务配置</div>
+          <div id="setServer"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">🗂️ 任务与工作区</div>
+          <div id="setTasks"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">🧭 评分体系</div>
+          <div id="setScoring"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">🤖 AI 项目管理（内置模型）</div>
+          <div id="setAi"></div>
+        </div>
+      </div>
+      <div style="margin-top:20px; text-align:right;">
+        <button class="btn primary" onclick="saveSettings()">💾 保存设置</button>
+      </div>
+    </main>
+
+    <footer class="footer" id="footer"></footer>
+  </div>
+</div>
+
+<!-- ========== 详情抽屉 ========== -->
+<div class="drawer-mask" id="drawerMask" onclick="if(event.target===this)closeDrawer()">
+  <aside class="drawer" id="drawer">
+    <div class="drawer-head">
+      <span class="drawer-title">任务详情</span>
+      <button class="drawer-close" onclick="closeDrawer()">✕</button>
+    </div>
+    <div id="drawerBody" class="drawer-body">加载中…</div>
+  </aside>
+</div>
+
+<!-- ========== 新建任务弹窗 ========== -->
+<div class="modal-mask" id="createMask" onclick="if(event.target===this)closeCreateForm()">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h2>＋ 新建任务</h2>
+    <label>标题 <span class="req">*</span></label>
+    <input type="text" id="fTitle" placeholder="例如：为看板增加执行者排行榜" autocomplete="off">
+    <label>描述 <span class="req">*</span></label>
+    <textarea id="fDesc" placeholder="写清楚要做什么、验收标准、涉及文件"></textarea>
+    <div class="row">
+      <div><label>优先级</label>
+        <select id="fPriority">
+          <option value="2">高</option>
+          <option value="1" selected>中</option>
+          <option value="0">低</option>
+        </select>
+      </div>
+      <div><label>ID 前缀</label>
+        <select id="fPrefix"></select>
+      </div>
+      <div><label>工作区</label>
+        <select id="fWorkspace"></select>
+      </div>
+    </div>
+    <div class="row">
+      <div><label>创建人</label>
+        <select id="fCreator" onchange="onFormCreatorChange(this.value)"></select>
+      </div>
+    </div>
+    <input type="text" class="creator-other-input" id="fCreatorOther" placeholder="请输入创建人名称" autocomplete="off">
+    <div class="modal-actions">
+      <button onclick="closeCreateForm()">取消</button>
+      <button class="primary" id="fSubmit" onclick="submitCreate()">创建</button>
+    </div>
+    <div class="modal-hint">创建后任务进入「⏳ 待领取」，任何 AI 都能领。表单打开时自动刷新已暂停。</div>
+  </div>
+</div>
+
+<!-- ========== 打分面板 ========== -->
+<div class="modal-mask" id="scoreMask" onclick="if(event.target===this)closeScoreForm()">
+  <div class="modal score-modal" onclick="event.stopPropagation()">
+    <h2>🧭 任务评分 <span id="scoreTaskId" class="score-task-id"></span></h2>
+    <div id="scoreDims"></div>
+    <label>评语</label>
+    <textarea id="fScoreComment" placeholder="写下优点、不足、改进建议（AI 会在下次领取时看到）"></textarea>
+    <div class="score-total-line">总分：<span id="scoreTotal" class="score-total">—</span></div>
+    <div class="modal-actions">
+      <button onclick="closeScoreForm()">取消</button>
+      <button class="primary" onclick="submitScore()">提交评分</button>
+    </div>
+    <div class="modal-hint" id="scoreHint">评分维度 1-4 分，总分 = 四维平均。提交后可再次修改覆盖。</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<link rel="stylesheet" href="/ranking.css">
+<script src="/ranking.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

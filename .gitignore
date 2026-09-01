@@ -1,0 +1,11 @@
+node_modules/
+.testdata/
+# 运行时数据默认在用户目录 ~/.adventure-guild/，产品目录一般无数据文件；
+# 若通过 AI_GUILD_DATA 指向本目录，按需忽略：
+data/
+
+# 敏感/本机数据：绝不入库
+backups/
+*.log
+web/patrol_log.json
+~/.adventure-guild/

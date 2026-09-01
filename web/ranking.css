@@ -1,0 +1,271 @@
+/* ============================================================
+   冒险公会 · 排行榜样式（任务：ai-027）
+   ============================================================ */
+
+/* ─── 排行榜容器 ─────────────────────────────────────── */
+.ranking-container {
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.ranking-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ranking-header h3 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--text);
+}
+
+.ranking-view-toggle {
+  display: flex;
+  gap: 8px;
+}
+
+.view-btn {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text-dim);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.view-btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.view-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+/* ─── Top 3 展示 ─────────────────────────────────────── */
+.top-three {
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 24px;
+  padding: 20px 0;
+}
+
+.top-player {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--panel-2);
+  transition: all 0.3s;
+}
+
+.top-player.current-player {
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 20px rgba(74, 144, 217, 0.3);
+}
+
+.top-player.tall {
+  order: 2;
+  padding: 24px;
+  min-width: 140px;
+}
+
+.top-player.medium {
+  order: 1;
+  padding: 16px;
+  min-width: 120px;
+}
+
+.top-player.short {
+  order: 3;
+  padding: 16px;
+  min-width: 120px;
+}
+
+.player-avatar {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.player-info {
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.player-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.player-stats {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.player-exp {
+  font-size: 12px;
+  color: var(--accent-bright);
+  font-weight: 600;
+}
+
+/* ─── 排行榜列表 ─────────────────────────────────────── */
+.ranking-list {
+  margin-bottom: 20px;
+}
+
+.ranking-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--panel-2);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  transition: all 0.2s;
+}
+
+.ranking-item:hover {
+  background: var(--line-soft);
+  transform: translateX(4px);
+}
+
+.ranking-item.current-player {
+  border: 1px solid var(--accent);
+  background: rgba(74, 144, 217, 0.1);
+}
+
+.rank-number {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin-right: 12px;
+}
+
+.rank-1 .rank-number { color: #ffd700; }
+.rank-2 .rank-number { color: #c0c0c0; }
+.rank-3 .rank-number { color: #cd7f32; }
+
+.rank-info {
+  flex: 1;
+}
+
+.rank-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.rank-details {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.rank-exp {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-bright);
+}
+
+/* ─── 当前玩家总结 ─────────────────────────────────────── */
+.current-player-summary {
+  background: linear-gradient(135deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  margin-top: 20px;
+}
+
+.summary-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+
+.summary-stats {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.summary-stats span {
+  font-size: 14px;
+  color: var(--text-dim);
+}
+
+.summary-stats strong {
+  color: var(--accent-bright);
+}
+
+.motivation {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--st-pending);
+  font-style: italic;
+}
+
+/* ─── 动画 ─────────────────────────────────────────────── */
+@keyframes rankEntry {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ranking-item {
+  animation: rankEntry 0.3s ease-out forwards;
+}
+
+.ranking-item:nth-child(1) { animation-delay: 0.1s; }
+.ranking-item:nth-child(2) { animation-delay: 0.2s; }
+.ranking-item:nth-child(3) { animation-delay: 0.3s; }
+
+/* ─── 响应式 ─────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .top-three {
+    flex-direction: column;
+    align-items: center;
+  }
+  
+  .top-player.tall,
+  .top-player.medium,
+  .top-player.short {
+    order: unset;
+    min-width: 100%;
+  }
+  
+  .ranking-header {
+    flex-direction: column;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  
+  .summary-stats {
+    flex-direction: column;
+    gap: 8px;
+  }
+}

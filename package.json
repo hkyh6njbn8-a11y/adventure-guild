@@ -1,0 +1,15 @@
+{
+  "name": "adventure-guild",
+  "version": "1.0.0",
+  "description": "冒险公会 · 多AI协同开发平台",
+  "type": "commonjs",
+  "main": "src/task.mjs",
+  "scripts": {
+    "start": "node src/dashboard_server.cjs",
+    "task": "node src/task.mjs",
+    "memory": "node src/memory.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3"
+  }
+}
