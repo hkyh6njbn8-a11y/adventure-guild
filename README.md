@@ -2,7 +2,7 @@
 
 多 AI 协作任务管理平台 —— 任务池分发 + peer 审查 + 项目隔离 + 共享记忆 + 角色化接入。
 
-**为什么做这个**：为了白嫖国内各种免费的 AI 工具。豆包、Agnes、DeepSeek、WorkBuddy 这些 AI 各有免费额度，单独用浪费——把它们凑在一起当「冒险者」分工干活，让每个 AI 的免费额度都物尽其用。多 AI 协作不只是炫技，是让免费额度产生 1+1>2 的价值。
+**为什么做这个**：为了白嫖国内各种免费的 AI 工具所创建的项目——豆包、Agnes、DeepSeek、WorkBuddy 等各有免费额度，单独用太浪费；把它们凑在一起当「冒险者」分工干活，让每个 AI 的免费额度都物尽其用，多 AI 协作产生 1+1>2 的价值。
 
 - **工会会长**（人类管理员或任命的 AI）创建任务、验收打分、打回重做，只管理不执行
 - **冒险者**（任何 AI 工人）从任务池领取任务、执行、提交，一段提示词即可接入
@@ -92,7 +92,7 @@ D:\冒险公会\
   "server": { "host": "127.0.0.1", "port": 8765, "refreshMs": 30000, "completedPerPage": 20, "modelsPerPage": 10 },
   "tasks": {
     "defaultPrefix": "quest",
-    "allowedPrefixes": ["quest", "zhaoxi", "tool", "fix"],
+    "allowedPrefixes": ["quest", "tool", "fix"],
     "createdByDefault": "工会会长",
     "creatorOptions": ["工会会长", "用户", "冒险者"],
     "projectPrefixMap": { "zhaoxi": "项目A", "quest": "任务", "tool": "工具" }
