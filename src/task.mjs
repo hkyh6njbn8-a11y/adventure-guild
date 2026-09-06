@@ -1,13 +1,14 @@
 // task.mjs — 冒险公会：任务看板 CLI
 // 用法:
 //   node task.mjs create "标题" "描述" [--priority 2] [--depends id1,id2] [--workspace 工作区]
-//   node task.mjs list [--status pending|in_progress|completed|failed|all] [--workspace 工作区]
+//   node task.mjs list [--status pending|in_progress|completed|failed|cancelled|all] [--prefix 前缀[,前缀2...]] [--workspace 工作区]
 //   node task.mjs show <task_id>
 //   node task.mjs claim <task_id> [--assignee "AI名称"]
 //   node task.mjs complete <task_id> --result "结果内容" [--notes "备注"]
 //   node task.mjs fail <task_id> --reason "失败原因"
+//   node task.mjs cancel <task_id[,task_id2,...]> --reason "取消原因" [--by "操作人"]
 //   node task.mjs reject <task_id> --reason "打回原因" [--by "打回者"]
-//   node task.mjs reset <task_id>
+//   node task.mjs reset <task_id[,task_id2,...]>
 //   node task.mjs score <task_id> --c N --q N --v N --r N [--comment '评语'] [--reviewer '评分人']
 //   node task.mjs agents [--workspace 工作区]
 //   node task.mjs workspaces
@@ -38,9 +39,65 @@ function priorityLabel(p) {
   return p >= 2 ? '高' : p >= 1 ? '中' : '低';
 }
 
+// opt-026: 难度星级标签（1-5星）
+function difficultyLabel(d) {
+  const n = parseInt(d) || 3;
+  const v = Math.max(1, Math.min(5, n));
+  return '⭐'.repeat(v);
+}
+
+// opt-026: 难度 → 基础奖励（EXP/金币）对照表
+// 1⭐5/10, 2⭐10/20, 3⭐20/35, 4⭐35/55, 5⭐50/80
+const DIFFICULTY_REWARDS = {
+  1: { exp: 5, coins: 10 },
+  2: { exp: 10, coins: 20 },
+  3: { exp: 20, coins: 35 },
+  4: { exp: 35, coins: 55 },
+  5: { exp: 50, coins: 80 }
+};
+
+// opt-026: 结算奖励（审查通过时调用）——难度定基础值，连击每连+5%封顶+100%（20连）
+function settleRewards(assignee, difficulty) {
+  const d = Math.max(1, Math.min(5, parseInt(difficulty) || 3));
+  const base = DIFFICULTY_REWARDS[d];
+  const agent = db.prepare('SELECT exp, level, combo, coins FROM agents WHERE name=?').get(assignee);
+  const oldExp = agent ? agent.exp : 0;
+  const oldLevel = agent ? agent.level : 1;
+  const oldCombo = agent ? agent.combo : 0;
+  const oldCoins = agent ? agent.coins : 0;
+  const newCombo = oldCombo + 1;
+  // 连击奖励：每连 +5%，20连封顶 +100%
+  const comboBonus = Math.min(newCombo * 0.05, 1.0);
+  const expGain = Math.floor(base.exp * (1 + comboBonus));
+  const coinGain = Math.floor(base.coins * (1 + comboBonus));
+  const newExp = oldExp + expGain;
+  const newLevel = Math.floor(Math.sqrt(newExp / 50)) + 1;
+  const newCoins = oldCoins + coinGain;
+  db.prepare(`INSERT INTO agents (name, total_tasks, avg_score, exp, level, combo, coins, created_at)
+              VALUES (?, 0, 0, ?, ?, ?, ?, datetime('now','localtime'))
+              ON CONFLICT(name) DO UPDATE SET exp=excluded.exp, level=excluded.level, combo=excluded.combo, coins=excluded.coins`)
+    .run(assignee, newExp, newLevel, newCombo, newCoins);
+  const levelUp = newLevel > oldLevel;
+  const comboText = newCombo >= 2 ? ` 🔥${newCombo}连击!` : '';
+  const bonusPct = Math.round(comboBonus * 100);
+  const bonusText = bonusPct > 0 ? `(连击+${bonusPct}%)` : '';
+  return {
+    difficulty: d, baseExp: base.exp, baseCoins: base.coins, comboBonus,
+    expGain, coinGain, newExp, newLevel, newCombo, newCoins, levelUp, comboText, bonusText
+  };
+}
+
 function statusLabel(s) {
-  const map = { pending: '⏳待领取', in_progress: '🔄进行中', review: '🔍待审查', completed: '✅已完成', failed: '❌失败' };
+  const map = { pending: '⏳待领取', in_progress: '🔄进行中', review: '🔍待审查', completed: '✅已完成', failed: '❌失败', cancelled: '🚫已取消' };
   return map[s] || s;
+}
+
+// tool-014：剥离标题上的 [重做] 前缀（重做标记已改由 reject_reason 字段表达，不再污染标题原文）
+function stripRedoPrefix(title) {
+  const t = String(title || '');
+  let out = t;
+  while (out.startsWith('[重做]')) out = out.slice('[重做]'.length).trimStart();
+  return out;
 }
 
 function isRedoTask(t) {
@@ -205,30 +262,36 @@ function validateCompletion(result, taskDesc) {
   if (!result || result.trim().length < 20) {
     issues.push('结果内容过短（<20字），疑似未实际描述工作内容');
   }
-  // 提取声称的文件路径（Windows绝对路径 / 相对路径 / 标记段）
+  // opt-032: 扩展名白名单（反馈2：补 dart/yaml/yml/md/json 等，Flutter 工程不再误判无改动）
+  const EXT_LIST = 'dart|yaml|yml|md|json|mjs|cjs|js|html|css|py|ts|tsx|jsx|xml|txt|sh|go|java|kt|swift';
+  // 【修改文件】/【改动文件】标记段：捕获到下一个【前（支持多行），按行/逗号/分号拆分
+  const tagMatch = result.match(/【(?:修改|改动)文件】\s*([^【]+)/);
   const claimedFiles = new Set();
-  // 【修改文件】/【改动文件】标记后的内容
-  const tagMatch = result.match(/【(?:修改|改动)文件】\s*([^\n【]+)/);
   if (tagMatch) {
-    tagMatch[1].split(/[,，;；]/).forEach(f => {
-      const clean = f.trim();
-      if (clean && clean.length > 3) claimedFiles.add(clean);
+    tagMatch[1].split(/\r?\n|[,，;；]/).forEach(f => {
+      const raw = f.trim();
+      // 只保留含受支持扩展名的路径段（丢弃验证文字/说明杂质行）
+      const m = raw.match(new RegExp('^(.*?\\.(?:' + EXT_LIST + '))(?:\\s|（|\\(|$)', 'i'));
+      if (m) {
+        const clean = m[1].trim();
+        if (clean.length > 3) claimedFiles.add(clean);
+      }
     });
   }
-  // Windows绝对路径 D:\...
-  const winMatches = result.matchAll(/[A-Za-z]:\\[^\s,，；;【】\n]+\.\w+/g);
-  for (const m of winMatches) claimedFiles.add(m[0]);
-  // 相对路径 src/...
-  const relMatches = result.matchAll(/(?:^|\s)((?:src|web|lib|core|config|data|assets)[\\/][^\s,，；;【】\n]+\.\w+)/g);
-  for (const m of relMatches) claimedFiles.add(m[1]);
+  // Windows绝对路径 D:\...（扩展名收进白名单；行尾注释放由上面统一清洗覆盖）
+  const winRe = new RegExp('[A-Za-z]:\\\\[^\\s,，；;【】\\n]+?\\.(?:' + EXT_LIST + ')\\b', 'g');
+  // 相对路径 src/...（前缀含 lib/test/android/ios 等，兼容 Flutter 工程）
+  const relRe = new RegExp('(?:^|\\s)((?:src|web|lib|core|config|data|assets|test|android|ios)[\\\\/][^\\s,，；;【】\\n]+?\\.(?:' + EXT_LIST + ')\\b)', 'g');
+  for (const m of result.matchAll(winRe)) claimedFiles.add(m[0]);
+  for (const m of result.matchAll(relRe)) claimedFiles.add(m[1]);
   evidence.files = [...claimedFiles];
-  // 验证文件是否存在
+  // 验证文件是否存在（针对清洗后路径，避免行尾注释放误判）
   const nonexistent = [];
-  for (const f of claimedFiles) {
+  for (const f of evidence.files) {
     try { if (!existsSync(f)) nonexistent.push(f); } catch { nonexistent.push(f); }
   }
-  if (claimedFiles.size > 0 && nonexistent.length > 0) {
-    issues.push(`声称改动的文件不存在（${nonexistent.length}个）：${nonexistent.slice(0,3).join('、')}${nonexistent.length > 3 ? '…' : ''}`);
+  if (evidence.files.length > 0 && nonexistent.length > 0) {
+    issues.push('声称改动的文件不存在（' + nonexistent.length + '个）：' + nonexistent.slice(0,3).join('、') + (nonexistent.length > 3 ? '…' : ''));
   }
   // 检查验证证据
   if (!/(验证|测试|检查|通过|语法|运行|截图|200|OK|成功|报错|错误)/i.test(result)) {
@@ -236,13 +299,13 @@ function validateCompletion(result, taskDesc) {
   } else {
     evidence.verified = true;
   }
-  // 任务涉及代码/文件但结果无文件路径
-  if (/(文件|代码|修改|实现|修复|添加|新增|删除|重构|前端|后端|脚本|函数|类|样式|界面|UI|API|接口)/i.test(taskDesc || '') && claimedFiles.size === 0) {
-    issues.push('任务涉及代码/文件改动，但结果中未列出任何修改文件路径');
+  // opt-032: 涉及代码/文件但提取不到 → 降级为警告（不硬拦，避免误杀 Flutter/纯说明）
+  const warnings = [];
+  if (/(文件|代码|修改|实现|修复|添加|新增|删除|重构|前端|后端|脚本|函数|类|样式|界面|UI|API|接口)/i.test(taskDesc || '') && evidence.files.length === 0) {
+    warnings.push('任务涉及代码/文件改动，但结果中未提取到任何修改文件路径（已降级为警告，请确认 result 确实列出了改动文件；支持 dart/yaml/md/json 等扩展名）');
   }
-  return { pass: issues.length === 0, issues, evidence };
+  return { pass: issues.length === 0, issues, warnings, evidence };
 }
-
 switch (cmd) {
 
   // ---------- create ----------
@@ -250,25 +313,33 @@ switch (cmd) {
     const title = args._[1];
     const description = args._[2] || '';
     if (!title) {
-      console.error('用法: node task.mjs create "标题" ["描述"] [--priority 0|1|2] [--prefix 前缀]');
+      console.error('用法: node task.mjs create "标题" ["描述"] [--priority 0|1|2] [--difficulty 1-5] [--prefix 前缀]');
       process.exit(1);
     }
     const priority = args.priority !== undefined ? parseInt(args.priority) : 1;
+    // opt-026: 难度字段（1-5星，默认 3）
+    let difficulty = args.difficulty !== undefined ? parseInt(args.difficulty) : 3;
+    if (isNaN(difficulty) || difficulty < 1 || difficulty > 5) {
+      console.error('❌ 难度必须为 1-5 的整数（--difficulty 1|2|3|4|5）');
+      process.exit(1);
+    }
     const prefix = args.prefix || inferPrefix(args._[1] || 'new-task');
     const taskId = genTaskId(prefix);
     const depends = args.depends_on || args.depends || '';
-    // tool-013：创建人，--created-by / --created_by 都收，不传默认「总指挥」
+    // tool-013：创建人，--created-by / --created_by 都收，不传默认「公会会长」
     const createdBy = (args['created-by'] || args.created_by
-      || (args['createdBy'] !== true ? args['createdBy'] : '') || '总指挥');
+      || (args['createdBy'] !== true ? args['createdBy'] : '') || '公会会长');
     // Phase 1：工作区（缺省=默认工作区）
     const ws = resolveWorkspace(true);
-    db.prepare(`INSERT INTO tasks (task_id, title, description, priority, depends_on, created_by, workspace_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)`).run(taskId, title, description, priority, depends, createdBy, ws.id);
+    db.prepare(`INSERT INTO tasks (task_id, title, description, priority, difficulty, depends_on, created_by, workspace_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(taskId, title, description, priority, difficulty, depends, createdBy, ws.id);
     console.log(`✅ 已创建任务 ${taskId}: ${title}`);
     console.log(`   优先级: ${priorityLabel(priority)}`);
+    console.log(`   难度: ${difficultyLabel(difficulty)}（${difficulty}）`);
     console.log(`   创建人: ${createdBy}`);
     console.log(`   工作区: ${ws.name}`);
     if (depends) console.log(`   依赖: ${depends}`);
+    try { sharedMemory.decision(taskId, '创建', `创建任务：${title}（优先级${priorityLabel(priority)}，难度${difficultyLabel(difficulty)}）`, createdBy); } catch (e) {}
     break;
   }
 
@@ -276,23 +347,38 @@ switch (cmd) {
   case 'list': {
     const status = args.status || 'pending';
     const ws = resolveWorkspace(false);
+    // tool-014：--prefix/--project 按任务 id 前缀过滤（逗号多值，如 --prefix tool,guild）
+    const prefixArg = String(args.prefix || args.project || '').trim();
+    const prefixes = prefixArg ? prefixArg.split(/[,，]/).map(s => s.trim().toLowerCase()).filter(Boolean) : [];
+    let prefixSql = '';
+    const prefixParams = [];
+    if (prefixes.length) {
+      prefixSql = ' AND (' + prefixes.map(p => {
+        const like = p.endsWith('-') ? p : p + '-%';
+        prefixParams.push(like);
+        return 'task_id LIKE ?';
+      }).join(' OR ') + ')';
+    }
+    const extra = prefixSql;
+    const extraParams = prefixParams;
     let rows;
     if (status === 'all') {
       rows = ws.filter
-        ? db.prepare('SELECT * FROM tasks WHERE workspace_id = ? ORDER BY priority DESC, created_at ASC').all(ws.id)
-        : db.prepare('SELECT * FROM tasks ORDER BY priority DESC, created_at ASC').all();
+        ? db.prepare(`SELECT * FROM tasks WHERE workspace_id = ?${extra} ORDER BY priority DESC, created_at ASC`).all(ws.id, ...extraParams)
+        : db.prepare(`SELECT * FROM tasks WHERE 1=1${extra} ORDER BY priority DESC, created_at ASC`).all(...extraParams);
     } else {
       rows = ws.filter
-        ? db.prepare('SELECT * FROM tasks WHERE status = ? AND workspace_id = ? ORDER BY priority DESC, created_at ASC').all(status, ws.id)
-        : db.prepare('SELECT * FROM tasks WHERE status = ? ORDER BY priority DESC, created_at ASC').all(status);
+        ? db.prepare(`SELECT * FROM tasks WHERE status = ? AND workspace_id = ?${extra} ORDER BY priority DESC, created_at ASC`).all(status, ws.id, ...extraParams)
+        : db.prepare(`SELECT * FROM tasks WHERE status = ?${extra} ORDER BY priority DESC, created_at ASC`).all(status, ...extraParams);
     }
     if (!rows.length) { console.log(args.json ? '[]' : '（无任务）'); break; }
     if (args.json) { console.log(JSON.stringify(rows)); break; }
-    console.log(`===== 任务列表（${status === 'all' ? '全部' : statusLabel(status)}）共 ${rows.length} 条${ws.filter ? `（工作区: ${ws.name}）` : '（全部工作区）'} =====\n`);
+    const pfxTxt = prefixes.length ? `（前缀: ${prefixes.join(',')}）` : '';
+    console.log(`===== 任务列表（${status === 'all' ? '全部' : statusLabel(status)}）共 ${rows.length} 条${pfxTxt}${ws.filter ? `（工作区: ${ws.name}）` : '（全部工作区）'} =====\n`);
     for (const r of rows) {
       const reworkMark = (isRedoTask(r) && !(r.title || '').startsWith('[重做]')) ? '[重做] ' : '';
       const wsName = dbutil.workspaceNameOf(db, r.workspace_id);
-      console.log(`[${r.task_id}] ${reworkMark}${statusLabel(r.status)} 优先级:${priorityLabel(r.priority)}  ${r.title}  （${wsName}）`);
+      console.log(`[${r.task_id}] ${reworkMark}${statusLabel(r.status)} 难度:${difficultyLabel(r.difficulty)} 优先级:${priorityLabel(r.priority)}  ${r.title}  （${wsName}）`);
       if (r.assignee) console.log(`    负责人: ${r.assignee} | 创建: ${r.created_at}`);
       if (r.description) console.log(`    ${r.description.slice(0, 80)}${r.description.length > 80 ? '…' : ''}`);
       console.log();
@@ -314,6 +400,7 @@ switch (cmd) {
     console.log(`===== ${r.task_id} =====`);
     console.log(`标题: ${r.title}`);
     console.log(`状态: ${statusLabel(r.status)}`);
+    console.log(`难度: ${difficultyLabel(r.difficulty)}（${parseInt(r.difficulty) || 3}）`);
     console.log(`优先级: ${priorityLabel(r.priority)}`);
     console.log(`负责人: ${r.assignee || '（未领取）'}`);
     console.log(`创建人: ${r.created_by || '未知'}`);
@@ -329,7 +416,7 @@ switch (cmd) {
         : ((r.description || '').match(/【被打回重做】([^\n]+)/) || [, ''])[1].trim();
       console.log(`\n🔄 重做任务历史链:`);
       console.log(`   原作者: ${r.original_assignee || '—'}`);
-      console.log(`   打回者: ${r.rejected_by || '总指挥'}${r.rejected_at ? `  （${r.rejected_at}）` : ''}`);
+      console.log(`   打回者: ${r.rejected_by || '公会会长'}${r.rejected_at ? `  （${r.rejected_at}）` : ''}`);
       if (reason) console.log(`   打回原因: ${reason}`);
       console.log(`   重做者: ${r.reworked_by || r.assignee || '（待重做）'}${r.reworked_at ? `  （${r.reworked_at}）` : ''}`);
     }
@@ -351,12 +438,19 @@ switch (cmd) {
   case 'claim': {
     const taskId = args._[1];
     if (!taskId) {
-      console.error('用法: node task.mjs claim <task_id> [--assignee "AI名称"]');
+      console.error('用法: node task.mjs claim <task_id> [--assignee "AI名称" | --worker "AI名称"]');
       process.exit(1);
     }
 
-    // 如果没有 --assignee，尝试从本地配置读取或交互式询问
-    let assignee = args.assignee;
+    // opt-032: --assignee / --worker 双别名（反馈：--worker 曾静默不生效覆盖署名）
+    let assignee = args.assignee || args.worker;
+    // opt-032: 未知参数直接报错（反馈：避免冒险者以为参数生效实际被静默忽略）
+    const claimKnown = ['assignee', 'worker'];
+    const claimUnknown = Object.keys(args).filter(k => k !== '_' && !claimKnown.includes(k));
+    if (claimUnknown.length > 0) {
+      console.error('❌ claim 收到未知参数: --' + claimUnknown.join(' --') + '（支持 --assignee / --worker 指定身份）');
+      process.exit(1);
+    }
     if (!assignee) {
       assignee = readAgentConfig();
       if (!assignee) {
@@ -418,10 +512,13 @@ switch (cmd) {
     }
     if (validation.pass) {
       console.log(`✅ 验收门禁通过（声称改动${validation.evidence.files.length}个文件，含验证证据）`);
+      if (validation.warnings && validation.warnings.length > 0) {
+        validation.warnings.forEach(w => console.log('  ⚠️ ' + w));
+      }
     } else if (force) {
       console.log('⚠️ 已使用 --force 跳过验收门禁');
     }
-    const taskInfo = db.prepare('SELECT assignee, reject_reason, priority FROM tasks WHERE task_id=?').get(taskId);
+    const taskInfo = db.prepare('SELECT assignee, reject_reason, priority, difficulty FROM tasks WHERE task_id=?').get(taskId);
     const isRework = taskInfo && taskInfo.reject_reason;
     const reworkedBy = isRework ? (taskInfo.assignee || '') : '';
     const reworkedAt = isRework ? nowStr() : '';
@@ -436,34 +533,17 @@ switch (cmd) {
     }
     console.log(`📤 任务 ${taskId} 已提交，等待审查（peer review：会长/审查员通过后完成，或打回重做）`);
     if (result) console.log(`结果: ${result.slice(0, 100)}${result.length > 100 ? '…' : ''}`);
-    // g003-003: 完成任务增加经验值，计算等级
-    // ai-026: 连击系统
-    if (taskInfo.assignee) {
-      const agent = db.prepare('SELECT exp, level, combo, coins FROM agents WHERE name=?').get(taskInfo.assignee);
-      const oldExp = agent ? agent.exp : 0;
-      const oldLevel = agent ? agent.level : 1;
-      const oldCombo = agent ? agent.combo : 0;
-      const oldCoins = agent ? agent.coins : 0;
-      const newCombo = oldCombo + 1;
-      const baseExp = taskInfo.priority >= 2 ? 30 : taskInfo.priority >= 1 ? 20 : 10;
-      // 连击奖励：1连击基础，2连+10%，3连+20%，4连+30%，5连+50%
-      const comboBonus = newCombo >= 5 ? 0.5 : newCombo >= 4 ? 0.3 : newCombo >= 3 ? 0.2 : newCombo >= 2 ? 0.1 : 0;
-      const expGain = Math.floor(baseExp * (1 + comboBonus));
-      const newExp = oldExp + expGain;
-      const newLevel = Math.floor(Math.sqrt(newExp / 50)) + 1;
-      // g003-005: 金币奖励（高50/中30/低10，连击额外加成）
-      const baseCoins = taskInfo.priority >= 2 ? 50 : taskInfo.priority >= 1 ? 30 : 10;
-      const coinGain = Math.floor(baseCoins * (1 + comboBonus));
-      const newCoins = oldCoins + coinGain;
-      db.prepare(`INSERT INTO agents (name, total_tasks, avg_score, exp, level, combo, coins, created_at)
-                  VALUES (?, 0, 0, ?, ?, ?, ?, datetime('now','localtime'))
-                  ON CONFLICT(name) DO UPDATE SET exp=excluded.exp, level=excluded.level, combo=excluded.combo, coins=excluded.coins`)
-        .run(taskInfo.assignee, newExp, newLevel, newCombo, newCoins);
-      const levelUp = newLevel > oldLevel;
-      const comboText = newCombo >= 2 ? ` 🔥${newCombo}连击!` : '';
-      const bonusText = comboBonus > 0 ? `(连击+${Math.round(comboBonus*100)}%)` : '';
-      console.log(`🎯 获得 ${expGain} 经验（优先级${priorityLabel(taskInfo.priority)}${bonusText}），当前 Lv.${newLevel} (${newExp} EXP)${comboText}${levelUp ? ' 🎉升级！' : ''}`);
-      console.log(`💰 获得 ${coinGain} 金币，当前余额 ${newCoins} 金币`);
+    // opt-026: 结算时机从 complete 移到 review --approve（审查通过时）。此处仅提示预期奖励。
+    if (taskInfo && taskInfo.assignee) {
+      const diff = Math.max(1, Math.min(5, parseInt(taskInfo.difficulty) || 3));
+      const base = DIFFICULTY_REWARDS[diff];
+      const agent = db.prepare('SELECT combo FROM agents WHERE name=?').get(taskInfo.assignee);
+      const curCombo = agent ? (agent.combo || 0) : 0;
+      const nextCombo = curCombo + 1;
+      const bonusPct = Math.round(Math.min(nextCombo * 5, 100));
+      const expHint = Math.floor(base.exp * (1 + Math.min(nextCombo * 0.05, 1)));
+      const coinHint = Math.floor(base.coins * (1 + Math.min(nextCombo * 0.05, 1)));
+      console.log(`💡 审查通过后结算：难度${difficultyLabel(diff)} 基础 ${base.exp}EXP/${base.coins}金币，连击+${bonusPct}%（${nextCombo}连）→ 约 ${expHint}EXP/${coinHint}金币`);
     }
     // 自动归档工作记录到 memories 表（记忆集成：由配置 integrations.memoryArchive 控制开关）
     if (cfg.integrations.memoryArchive) {
@@ -475,15 +555,11 @@ switch (cmd) {
         const imp = task.priority >= 2 ? 3 : (task.priority >= 1 ? 2 : 1);
         const descShort = (task.description || '').slice(0, 300);
         const content = `【任务】${taskId} ${task.title}\n【负责人】${task.assignee || '未知'}\n【完成时间】${new Date().toLocaleString('zh-CN')}\n【任务描述】${descShort}\n【完成结果】${result || '（无）'}`;
-        const tags = JSON.stringify([taskId, task.assignee || 'unknown', proj]);
-        db.prepare(`INSERT INTO memories (id, type, title, content, tags, importance, confidence, source, created_at, updated_at)
-                    VALUES (?, 'work_log', ?, ?, ?, ?, 0.9, 'task_pool', datetime('now','localtime'), datetime('now','localtime'))`
-        ).run(randomUUID(), `[工作记录] ${taskId} ${task.title}`, content, tags, imp);
-        console.log(`📝 工作记录已归档到记忆库`);
-        // ── 共享项目记忆库打通：同步写共享记忆库（走 memory.mjs 标准工具，合规）──
+        // ── 软件记忆只存总会长控制经验，冒险者工作记录不写软件记忆 ──
+        // ── 共享项目记忆库：同步写（用户私有，不跟着软件走）──
         const who = task.assignee || '未知';
         const shr = sharedMemory.archiveLog(`${content}`, who);
-        if (shr.ok) console.log(`📚 工作记录已同步到共享项目记忆库（${who}）`);
+        if (shr.ok) console.log(`📚 工作记录已归档到共享记忆库（${who}）`);
         else console.log(`⚠️ 共享记忆库写入跳过: ${shr.error || '不可用'}`);
       }
     } catch (e) {
@@ -554,6 +630,58 @@ switch (cmd) {
     break;
   }
 
+  // ---------- cancel（tool-014：终止/废弃闭环）----------
+  // 允许 pending / in_progress / review / failed → cancelled；completed 不允许（历史不可改）
+  // 同一事务：释放 assignee/claimed_at、写 result 取消原因、completed_at 时间戳、连击清零、剥离 [重做] 前缀、决策日志
+  // 支持批量：cancel id1,id2 --reason "..."
+  case 'cancel': {
+    const rawIds = String(args._[1] || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    const reason = args.reason || args.result || '未知原因';
+    const by = args.by || args.canceled_by || args.cancelled_by || '公会会长';
+    if (!rawIds.length) {
+      console.error('用法: node task.mjs cancel <task_id[,task_id2,...]> --reason "取消原因" [--by "操作人"]');
+      process.exit(1);
+    }
+    let okCount = 0;
+    const isCompleted = (r) => r && r.status === 'completed';
+    const allowed = ['pending', 'in_progress', 'review', 'failed'];
+    for (const taskId of rawIds) {
+      const r = db.prepare('SELECT status, assignee, title FROM tasks WHERE task_id=?').get(taskId);
+      if (!r) {
+        console.error(`❌ 取消失败：任务 ${taskId} 不存在`);
+        continue;
+      }
+      if (isCompleted(r)) {
+        console.error(`❌ 取消失败：任务 ${taskId} 已完成（${statusLabel(r.status)}），已完成历史不允许修改，无法取消`);
+        continue;
+      }
+      if (!allowed.includes(r.status)) {
+        console.error(`❌ 取消失败：任务 ${taskId} 状态为 ${statusLabel(r.status)}，只能取消 ${allowed.map(statusLabel).join('/')} 的任务`);
+        continue;
+      }
+      const now = nowStr();
+      const cleanTitle = stripRedoPrefix(r.title);
+      const logLine = `[${now}] ⛔ 已取消：${reason}（操作人：${by}）`;
+      const newResult = (r.result || '').trim() ? (r.result || '').trim() + '\n' + logLine : logLine;
+      const info = db.prepare(`UPDATE tasks SET status='cancelled', assignee='', claimed_at='',
+                               title=?, result=?, completed_at=?, reworked_by='', reworked_at=''
+                               WHERE task_id=? AND status IN ('pending','in_progress','review','failed')`)
+        .run(cleanTitle, newResult, now, taskId);
+      if (info.changes === 0) {
+        console.error(`❌ 取消失败：任务 ${taskId} 状态已变化，请重试`);
+        continue;
+      }
+      // opt-026: 取消不清零连击（与 fail/reject/reset 不同——取消非执行者过失）
+      // 决策日志（异步写共享记忆库，失败不阻塞）
+      try { sharedMemory.decision(taskId, '取消', `${reason}（由 ${by} 取消，原状态 ${statusLabel(r.status)}${r.assignee ? '，原负责人 ' + r.assignee : ''}）`, by); } catch (e) {}
+      console.log(`⛔ 任务 ${taskId} 已取消（${statusLabel(r.status)} → cancelled）：${reason}`);
+      okCount++;
+    }
+    if (!okCount) process.exit(1);
+    console.log(`   共取消 ${okCount}/${rawIds.length} 个任务`);
+    break;
+  }
+
   // ---------- review（peer 审查：通过 / 打回）----------
   case 'review': {
     const taskId = args._[1];
@@ -564,17 +692,17 @@ switch (cmd) {
       console.error('      node task.mjs review <task_id> --reject --reason "打回原因" [--by "审查员"]');
       process.exit(1);
     }
-    const task = db.prepare('SELECT status, assignee, title, description, result, notes, original_assignee FROM tasks WHERE task_id=?').get(taskId);
+    const task = db.prepare('SELECT status, assignee, title, description, result, notes, original_assignee, difficulty FROM tasks WHERE task_id=?').get(taskId);
     if (!task) { console.error(`任务 ${taskId} 不存在`); process.exit(1); }
     if (task.status !== 'review') {
       console.error(`❌ 审查失败：任务状态为 ${statusLabel(task.status)}，只能审查「待审查」的任务`);
       process.exit(1);
     }
     if (reject) {
-      // 打回重做（与 reject 命令同逻辑）
+      // 打回重做（与 reject 命令同逻辑；tool-014：重做标记由 reject_reason/rejected_by 字段表达，标题不再写 [重做] 前缀）
       const reason = args.reason || '审查未通过';
       const reviewer = args.by || args.reviewer || '审查员';
-      const newTitle = (task.title || '').startsWith('[重做]') ? task.title : `[重做]${task.title || ''}`;
+      const newTitle = stripRedoPrefix(task.title || '');
       const newDesc = (task.description || '') + `\n\n【被打回重做】${reason}`;
       const now = nowStr();
       const prevSubmit = (task.result || '').trim();
@@ -594,10 +722,17 @@ switch (cmd) {
       }
       console.log(`↩️ 任务 ${taskId} 审查不通过，已打回（审查员: ${reviewer}）：${reason}`);
       console.log(`   标题已标记 [重做]，冒险者可重新领取执行`);
+      try { sharedMemory.decision(taskId, '打回', `审查打回，原因：${reason}`, reviewer); } catch (e) {}
     } else {
       // 通过审查
       db.prepare(`UPDATE tasks SET status='completed' WHERE task_id=?`).run(taskId);
       console.log(`✅ 任务 ${taskId} 审查通过，状态更新为已完成`);
+      // opt-026: 结算时机改为审查通过时——难度定基础奖励，连击每连+5%封顶+100%（20连），完成/取消/失败/打回清零逻辑不变
+      if (task.assignee) {
+        const st = settleRewards(task.assignee, task.difficulty);
+        console.log(`🎯 获得 ${st.expGain} 经验（难度${difficultyLabel(st.difficulty)} ${st.baseExp}基础${st.bonusText}），当前 Lv.${st.newLevel} (${st.newExp} EXP)${st.comboText}${st.levelUp ? ' 🎉升级！' : ''}`);
+        console.log(`💰 获得 ${st.coinGain} 金币，当前余额 ${st.newCoins} 金币`);
+      }
       // 可选打分（与 score 命令同逻辑）
       const c = args.c !== undefined ? parseInt(args.c) : undefined;
       const q = args.q !== undefined ? parseInt(args.q) : undefined;
@@ -633,6 +768,7 @@ switch (cmd) {
       } else {
         console.log(`   提示：可用 --c --q --v --r 附带评分，或稍后用 score 命令补分`);
       }
+      try { sharedMemory.decision(taskId, '审查通过', `审查通过${c !== undefined ? '并评分' : ''}（${task.assignee || '未知'}）`, args.reviewer || '审查员'); } catch (e) {}
     }
     break;
   }
@@ -641,7 +777,7 @@ switch (cmd) {
   case 'reject': {
     const taskId = args._[1];
     const reason = args.reason || '未说明原因';
-    const rejectedBy = args.by || args.rejected_by || '总指挥';
+    const rejectedBy = args.by || args.rejected_by || '公会会长';
     if (!taskId) { console.error('用法: node task.mjs reject <task_id> --reason "打回原因" [--by "打回者"]'); process.exit(1); }
     const r = db.prepare('SELECT status, assignee, result, title, notes, original_assignee FROM tasks WHERE task_id=?').get(taskId);
     if (!r) { console.error(`任务 ${taskId} 不存在`); process.exit(1); }
@@ -649,7 +785,7 @@ switch (cmd) {
       console.error(`❌ 打回失败：任务状态为 ${statusLabel(r.status)}，只能打回 completed / in_progress / 待审查 的任务`);
       process.exit(1);
     }
-    const newTitle = (r.title || '').startsWith('[重做]') ? r.title : `[重做]${r.title || ''}`;
+    const newTitle = stripRedoPrefix(r.title || '');
     const newDesc = (r.description || '') + `\n\n【被打回重做】${reason}`;
     const now = nowStr();
     const prevSubmit = (r.result || '').trim();
@@ -663,7 +799,7 @@ switch (cmd) {
                 rejected_by=?, rejected_at=?, reject_reason=?
                 WHERE task_id=?`).run(newTitle, newDesc, newNotes, r.assignee || '', rejectedBy, now, reason, taskId);
     console.log(`↩️ 任务 ${taskId} 已打回（打回者: ${rejectedBy}, 原作者: ${r.assignee || '未领取'}）：${reason}`);
-    console.log(`   标题已标记 [重做]，上次提交已存入 notes，可在看板「重做」筛选里查看完整历史链`);
+    console.log(`   已标记为重做（reject_reason 字段），冒险者可重新领取执行`);
     // ai-026: 打回清零连击
     if (r.assignee) {
       db.prepare(`INSERT INTO agents (name, total_tasks, avg_score, exp, level, combo, created_at)
@@ -671,16 +807,36 @@ switch (cmd) {
                   ON CONFLICT(name) DO UPDATE SET combo=0`).run(r.assignee);
       console.log(`💔 连击已清零`);
     }
+    try { sharedMemory.decision(taskId, '打回', `打回重做，原因：${reason}`, rejectedBy); } catch (e) {}
     break;
   }
 
   // ---------- reset ----------
   case 'reset': {
-    const taskId = args._[1];
-    if (!taskId) { console.error('用法: node task.mjs reset <task_id>（将任务重置为待领取）'); process.exit(1); }
-    db.prepare(`UPDATE tasks SET status='pending', assignee='', claimed_at='', result='', completed_at=''
-                WHERE task_id=?`).run(taskId);
-    console.log(`🔄 任务 ${taskId} 已重置为待领取`);
+    // tool-014：支持批量（逗号分隔）
+    const ids = String(args._[1] || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    if (!ids.length) { console.error('用法: node task.mjs reset <task_id[,task_id2,...]>（将任务重置为待领取）'); process.exit(1); }
+    for (const taskId of ids) {
+      // opt-026: 重置前记录原负责人（超时重置需清零其连击）
+      const r0 = db.prepare('SELECT assignee FROM tasks WHERE task_id=?').get(taskId);
+      const info = db.prepare(`UPDATE tasks SET status='pending', assignee='', claimed_at='', result='', completed_at=''
+                  WHERE task_id=? AND status IN ('pending','in_progress','review','failed','cancelled')`).run(taskId);
+      if (info.changes === 0) {
+        const r = db.prepare('SELECT status FROM tasks WHERE task_id=?').get(taskId);
+        if (!r) console.error(`❌ 重置失败：任务 ${taskId} 不存在`);
+        else if (r.status === 'completed') console.error(`❌ 重置失败：任务 ${taskId} 已完成，历史不可改`);
+        else console.error(`❌ 重置失败：任务 ${taskId} 状态为 ${statusLabel(r.status)}，无法重置`);
+        continue;
+      }
+      // opt-026: 超时/异常重置视为中断，原负责人连击清零（与 fail/reject 一致）
+      if (r0 && r0.assignee) {
+        db.prepare(`INSERT INTO agents (name, total_tasks, avg_score, exp, level, combo, created_at)
+                    VALUES (?, 0, 0, 0, 1, 0, datetime('now','localtime'))
+                    ON CONFLICT(name) DO UPDATE SET combo=0`).run(r0.assignee);
+      }
+      console.log(`🔄 任务 ${taskId} 已重置为待领取${r0 && r0.assignee ? `（原负责人 ${r0.assignee} 连击已清零）` : ''}`);
+      try { sharedMemory.decision(taskId, '重置', `重置为待领取${r0 && r0.assignee ? `（原负责人 ${r0.assignee}）` : ''}`, '公会会长'); } catch (e) {}
+    }
     break;
   }
 
@@ -697,7 +853,7 @@ switch (cmd) {
     const v = args.v !== undefined ? parseInt(args.v) : undefined;
     const r_score = args.r !== undefined ? parseInt(args.r) : undefined;
     const comment = args.comment || '';
-    const reviewer = args.reviewer || '总指挥';
+    const reviewer = args.reviewer || '公会会长';
 
     // 校验维度分数
     const dims = [{ key: 'c', val: c, name: '完成度' }, { key: 'q', val: q, name: '质量' },
@@ -753,6 +909,36 @@ switch (cmd) {
     console.log(`   完成度:${c} 质量:${q} 验证:${v} 记录:${r_score} → 总分:${total}`);
     if (comment) console.log(`   评语: ${comment}`);
     console.log(`   评分人: ${reviewer}`);
+    try { sharedMemory.decision(taskId, '评分', `评分 ${total}（完成${c}/质量${q}/验证${v}/记录${r_score}）${comment ? ' 评语：' + comment : ''}`, reviewer); } catch (e) {}
+    break;
+  }
+
+  // ---------- knowledge（总会长写入控制经验到软件记忆，供开源）───────────
+  case 'knowledge': {
+    const sub = args._[1];
+    if (sub === 'add') {
+      const title = args._[2];
+      const content = args._[3] || '';
+      const importance = Math.max(1, Math.min(4, parseInt(args.importance) || 3));
+      const tagsInput = args.tags ? args.tags.split(',').map(t => t.trim()).filter(Boolean) : [];
+      const tags = JSON.stringify(['冒险公会', '控制经验', ...tagsInput]);
+      if (!title) { console.error('用法: node task.mjs knowledge add "标题" "内容" [--importance 1-4] [--tags "标签1,标签2"]'); process.exit(1); }
+      db.prepare(`INSERT INTO memories (id, type, title, content, tags, importance, confidence, source, created_at, updated_at, status)
+                  VALUES (?, 'knowledge', ?, ?, ?, ?, 0.9, 'guild_knowledge', datetime('now','localtime'), datetime('now','localtime'), 'active')`)
+        .run(randomUUID(), title, content, tags, importance);
+      console.log(`✅ 已写入控制经验到软件记忆（供开源）`);
+      console.log(`   标题: ${title}`);
+      console.log(`   重要度: ${importance}`);
+      console.log(`   标签: ${tagsInput.join(', ') || '（默认）'}`);
+    } else if (sub === 'list') {
+      const rows = db.prepare("SELECT title, importance, created_at FROM memories WHERE source='guild_knowledge' AND status='active' ORDER BY importance DESC, created_at DESC").all();
+      console.log(`=== 软件记忆控制经验（${rows.length}条）===`);
+      rows.forEach(r => console.log(`  [${r.importance}] ${r.title}（${r.created_at}）`));
+    } else {
+      console.log('用法:');
+      console.log('  node task.mjs knowledge add "标题" "内容" [--importance 1-4] [--tags "标签1,标签2"]');
+      console.log('  node task.mjs knowledge list');
+    }
     break;
   }
 
@@ -849,23 +1035,42 @@ switch (cmd) {
     console.log(`冒险公会：任务看板 CLI
 
 用法:
-  node task.mjs create "标题" ["描述"] [--priority 0|1|2] [--prefix 前缀]
-  node task.mjs list [--status pending|in_progress|completed|failed|all]
+  node task.mjs create "标题" ["描述"] [--priority 0|1|2] [--difficulty 1-5] [--prefix 前缀]
+  node task.mjs list [--status pending|in_progress|review|completed|failed|cancelled|all] [--prefix 前缀[,前缀2...]]
   node task.mjs show <task_id>
   node task.mjs claim <task_id> [--assignee "AI名称"]
   node task.mjs complete <task_id> --result "结果内容" [--notes "备注"]
   node task.mjs fail <task_id> --reason "失败原因"
+  node task.mjs cancel <task_id[,task_id2,...]> --reason "取消原因" [--by "操作人"]
   node task.mjs reject <task_id> --reason "打回原因" [--by "打回者"]
-  node task.mjs reset <task_id>
+  node task.mjs reset <task_id[,task_id2,...]>
   node task.mjs score <task_id> --c N --q N --v N --r N [--comment "评语"] [--reviewer "评分人"]
   node task.mjs agents [--workspace 工作区]
   node task.mjs workspaces
   node task.mjs agent --reset
 
+命令 ↔ 状态迁移（内部值 → 中文标签）:
+  create     → pending（⏳待领取）
+  claim      → pending → in_progress（🔄进行中）
+  complete   → in_progress → review（🔍待审查，不结算）
+  review --approve → review → completed（✅已完成，此时结算奖励）[可附 --c --q --v --r 打分]
+  reject / review --reject → 打回 pending（记 reject_reason 标重做，重新可领，连击清零）
+  fail       → in_progress → failed（❌失败，执行者申报失败，连击清零）
+  cancel     → pending/in_progress/review/failed → cancelled（🚫已取消，终止闭环；completed 不可取消）
+  reset      → 各状态 → pending（重新可领；completed 不可重置）
+  score      → 仅 completed 可评分
+
+难度与奖励（opt-026，审查通过时结算）:
+  --difficulty 1-5（默认 3）：1⭐=5EXP/10金币、2⭐=10/20、3⭐=20/35、4⭐=35/55、5⭐=50/80
+  连击加成：每连 +5%，20连封顶 +100%（失败/打回/超时重置清零，取消不清零）
+
 工作区:
   --workspace <名称> 指定工作区（也可用环境变量 AI_GUILD_WORKSPACE）
   缺省：create 进「默认」工作区；list / agents 看全部工作区
   workspaces: 列出所有工作区及任务数
+
+前缀过滤（多项目分权）:
+  list --prefix tool,guild  只看 tool-* 与 guild 前缀任务（逗号多值，不传=全部）
 
 打分说明:
   score 四维度 1-4 分：completion完成度/quality质量/verification验证/record记录
@@ -875,11 +1080,16 @@ switch (cmd) {
  agent --reset: 清除本地配置重新注册
  claim 不带 --assignee: 交互式询问名称并自动注册
 
+Windows 提示:
+  · 本文件与数据均为 UTF-8，PowerShell 下请先执行 chcp 65001 或用 Get-Content -Encoding utf8 查看，避免中文乱码
+  · 写辅助脚本 import 本仓库 .cjs 时用 createRequire + pathToFileURL（ESM 直接 import 'D:/...' 会报 ERR_UNSUPPORTED_ESM_URL_SCHEME）
+
 示例:
   node task.mjs create "设计任务看板的数据库表" "设计任务池的加密数据库表" --priority 2 --prefix quest
   node task.mjs list --status pending
   node task.mjs claim zhaoxi-001 --assignee "AgnesCode (Agnes-2.5-Pro)"
-  node task.mjs score zhaoxi-001 --c 4 --q 3 --v 4 --r 3 --comment "结构完整，自检通过" --reviewer "总指挥"
+  node task.mjs cancel zaima-005,zaima-006 --reason "需求变更废弃"
+  node task.mjs score zhaoxi-001 --c 4 --q 3 --v 4 --r 3 --comment "结构完整，自检通过" --reviewer "公会会长"
   node task.mjs agents
 `);
 }

@@ -19,6 +19,10 @@ const DEFAULT_CONFIG = {
     title: '冒险公会 · 任务看板',     // 页面标题
     footer: '冒险公会任务看板 · 动态服务模式'
   },
+  guild: {
+    // opt-022: 公会管理层——总会长（执事从 projects 表 leader 字段读取，无需配置）
+    chiefLeader: '豆包 (Doubao-MainAgent)'
+  },
   server: {
     host: '127.0.0.1',
     port: 8765,

@@ -9,3 +9,25 @@ backups/
 *.log
 web/patrol_log.json
 ~/.adventure-guild/
+
+# 运行时 PID 文件
+*.pid
+
+# 开发临时脚本（_开头的 .cjs/.mjs/.js）
+_*.cjs
+_*.mjs
+_*.js
+
+# Edge 调试临时目录
+.edge_*/
+
+# 备份文件（*.bak_*）
+*.bak_*
+
+# 临时报告
+FIX004_REPORT.md
+
+# 系统文件
+Thumbs.db
+.DS_Store
+desktop.ini

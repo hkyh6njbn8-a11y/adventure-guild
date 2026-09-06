@@ -27,6 +27,7 @@ function ensureSchema(db) {
       status TEXT DEFAULT 'pending',
       assignee TEXT DEFAULT '',
       priority INTEGER DEFAULT 1,
+      difficulty INTEGER DEFAULT 3,
       depends_on TEXT DEFAULT '',
       result TEXT DEFAULT '',
       notes TEXT DEFAULT '',
@@ -109,6 +110,36 @@ function ensureSchema(db) {
     );
   `);
 
+    // ─── opt-015: projects 表（项目动态管理，替代硬编码前缀映射）───
+    // key 为项目标识（如 guild/zhaoxi/suixin）；prefixes 为前缀列表 JSON 数组；
+    // all/other 为系统保留项不入表。leader 为会长/负责人（可空）。
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS projects (
+        key TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        prefixes TEXT NOT NULL DEFAULT '[]',
+        leader TEXT DEFAULT '',
+        sort_order INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        updated_at TEXT DEFAULT (datetime('now','localtime'))
+      );
+    `);
+    // 种子数据迁移（幂等：仅当表空时插入）。与历史硬编码保持一致：
+    // guild 含 quest-/ai-/opt-/fix-/g001-/g002-/g003-/tool-；zaima 含 zaima-/zaimozaime-；suixin 含 suixin-
+    const projCnt = db.prepare('SELECT COUNT(*) as cnt FROM projects').get().cnt;
+    if (projCnt === 0) {
+      const seedProjects = [
+        ['guild',  '冒险公会', JSON.stringify(['quest-', 'ai-', 'opt-', 'fix-', 'g001-', 'g002-', 'g003-', 'tool-']), '', 10],
+        ['zhaoxi', '朝夕',     JSON.stringify(['zhaoxi-']), '', 20],
+        ['zaima',  '在么在么', JSON.stringify(['zaima-', 'zaimozaime-']), '', 30],
+        ['suixin', '随心日记', JSON.stringify(['suixin-']), '', 40]
+      ];
+      const ins = db.prepare(`INSERT INTO projects (key, name, prefixes, leader, sort_order)
+                              VALUES (?, ?, ?, ?, ?)`);
+      for (const p of seedProjects) ins.run(...p);
+      console.log('迁移：已初始化 projects 表种子（guild/zhaoxi/zaima/suixin）');
+    }
+
     // ─── g003-013: 公会任务与悬赏表 ──────────────────
     db.exec(`
       CREATE TABLE IF NOT EXISTS guild_tasks (
@@ -132,6 +163,27 @@ function ensureSchema(db) {
       CREATE INDEX IF NOT EXISTS idx_guild_tasks_poster ON guild_tasks(poster);
     `);
 
+    // ─── opt-030: feedbacks 反馈表（双向多角色反馈系统）───
+    // from_role: adventurer/leader/chief；category: bug/建议/问题/汇报/通知/其他
+    // status: unread/read/resolved；to_whom 可为 总会长/执事名/项目名
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS feedbacks (
+        id         TEXT PRIMARY KEY,
+        task_id    TEXT DEFAULT '',
+        from_whom  TEXT NOT NULL,
+        from_role  TEXT NOT NULL DEFAULT 'adventurer',
+        to_whom    TEXT NOT NULL,
+        category   TEXT NOT NULL DEFAULT '其他',
+        content    TEXT NOT NULL,
+        status     TEXT NOT NULL DEFAULT 'unread',
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        read_at    TEXT DEFAULT '',
+        resolved_at TEXT DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_feedbacks_to ON feedbacks(to_whom, status);
+      CREATE INDEX IF NOT EXISTS idx_feedbacks_status ON feedbacks(status);
+    `);
+
   // ─── tasks 表重做历史字段迁移 ────────────────────
   const taskCols = db.prepare('PRAGMA table_info(tasks)').all().map(c => c.name);
   const redoCols = [
@@ -148,6 +200,12 @@ function ensureSchema(db) {
       db.exec(`ALTER TABLE tasks ADD COLUMN ${col} ${def}`);
       console.log(`迁移：已添加字段 tasks.${col}`);
     }
+  }
+
+  // ─── opt-026: tasks.difficulty 难度字段迁移（1-5星，默认3）───
+  if (!taskCols.includes('difficulty')) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN difficulty INTEGER DEFAULT 3`);
+    console.log('迁移：已添加 tasks.difficulty 字段（1-5星，默认3）');
   }
 
   // ─── task_scores.reviewed 字段迁移 ────────────────
@@ -263,18 +321,48 @@ function workspaceNameOf(db, id) {
 }
 
 // g003-013: 生成公会任务ID
-function genGuildTaskId() {
+function genGuildTaskId(db) {
   const row = db.prepare("SELECT task_id FROM guild_tasks ORDER BY task_id DESC LIMIT 1").get();
   let nextNum = 1;
   if (row) {
-    const m = row.task_id.match(/^g Guild-(\d+)$/);
+    const m = row.task_id.match(/^gGuild-(\d+)$/);
     if (m) nextNum = parseInt(m[1], 10) + 1;
   }
   return `gGuild-${String(nextNum).padStart(3, '0')}`;
 }
 
+// ─── opt-015: 项目（projects 表）帮助函数 ───
+function listProjects(db) {
+  return db.prepare('SELECT * FROM projects ORDER BY sort_order ASC, key ASC').all()
+    .map(p => ({ ...p, prefixes: safeParseArr(p.prefixes) }));
+}
+
+function getProject(db, key) {
+  const row = db.prepare('SELECT * FROM projects WHERE key = ?').get(String(key || '').trim());
+  return row ? { ...row, prefixes: safeParseArr(row.prefixes) } : null;
+}
+
+function safeParseArr(s) {
+  try {
+    const v = JSON.parse(s || '[]');
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+
+// 收集所有项目前缀（用于 other 的 notLike 与冲突校验）
+function allProjectPrefixes(db, excludeKey) {
+  const rows = db.prepare('SELECT key, prefixes FROM projects').all();
+  const out = [];
+  for (const r of rows) {
+    if (excludeKey && r.key === excludeKey) continue;
+    for (const pf of safeParseArr(r.prefixes)) out.push(pf);
+  }
+  return out;
+}
+
 module.exports = {
   openDb, ensureSchema,
   getWorkspaces, getDefaultWorkspaceId, getOrCreateWorkspace, workspaceNameOf,
-  genGuildTaskId
+  genGuildTaskId,
+  listProjects, getProject, safeParseArr, allProjectPrefixes
 };

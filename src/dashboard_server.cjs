@@ -6,6 +6,7 @@
 // 用法：node dashboard_server.cjs
 
 const http = require('http');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync, spawn } = require('node:child_process');
@@ -17,6 +18,10 @@ const sharedMemory = require('./lib/sharedMemory.cjs');
 const db = dbutil.openDb();
 dbutil.ensureSchema(db);
 
+// opt-015: 项目缓存（projects 表 → projectCond 动态过滤），启动时加载
+let PROJECT_CACHE = []; // [{key,name,prefixes(带%),leader,sort_order}]
+loadProjectCache();
+
 const PORT = cfg.server.port;
 const HOST = cfg.server.host;
 const COMPLETED_PER_PAGE = cfg.server.completedPerPage;
@@ -25,7 +30,7 @@ const REFRESH_MS = cfg.server.refreshMs;
 const WEB_ROOT = path.join(__dirname, '..', 'web');
 const PRODUCT_ROOT = path.join(__dirname, '..');
 
-const statusLabel = { 'pending': '⏳ 待领取', 'in_progress': '🔄 进行中', 'review': '🔍 待审查', 'completed': '✅ 已完成', 'failed': '❌ 失败' };
+const statusLabel = { 'pending': '⏳ 待领取', 'in_progress': '🔄 进行中', 'review': '🔍 待审查', 'completed': '✅ 已完成', 'failed': '❌ 失败', 'cancelled': '🚫 已取消' };
 const priorityLabel = { 0: '低', 1: '中', 2: '高' };
 const priorityColor = { 0: '#94a3b8', 1: '#f59e0b', 2: '#ef4444' };
 
@@ -48,22 +53,53 @@ function resolveWsId(workspace) {
 }
 
 // ─── 项目识别（按 task_id 前缀，全数据隔离）────────────────
-// 项目 → 前缀映射；other = 不属于任何已知项目。like 条件间 OR，notLike 条件间 AND。
+// opt-015: 项目→前缀映射改为从 projects 表动态读取（启动加载 + CRUD 后刷新），
+//          不再硬编码。tool 为 guild 的兼容别名（旧前端/旧 localStorage 仍可能请求 project=tool）。
+function loadProjectCache() {
+  try {
+    PROJECT_CACHE = dbutil.listProjects(db).map(p => ({
+      ...p,
+      prefixes: (p.prefixes || []).map(pf => (pf.endsWith('-') ? pf + '%' : pf)) // 存 'quest-' → 用 'quest-%'
+    }));
+  } catch (e) {
+    console.warn('⚠️ projects 表读取失败，回退空列表:', e.message);
+    PROJECT_CACHE = [];
+  }
+  return PROJECT_CACHE;
+}
+function getProjectConf(key) {
+  if (key === 'tool') { // 兼容别名：tool → guild 的前缀集合
+    const g = PROJECT_CACHE.find(p => p.key === 'guild');
+    return g ? { key: 'guild', prefixes: g.prefixes } : null;
+  }
+  return PROJECT_CACHE.find(p => p.key === key) || null;
+}
 function projectCond(project, alias) {
   const a = alias ? alias + '.' : '';
   if (!project || project === 'all') return { sql: '', params: [] };
-  const P = {
-    zhaoxi: { like: ['zhaoxi-%'] },
-    tool:   { like: ['tool-%'] },
-    guild:  { like: ['quest-%', 'ai-%', 'opt-%', 'g001-%', 'g003-%', 'fix-%'] },
-    zaima:  { like: ['zaima-%', 'zaimozaime-%'] },
-    other:  { notLike: ['zhaoxi-%', 'tool-%', 'quest-%', 'ai-%', 'opt-%', 'g001-%', 'g003-%', 'fix-%', 'zaima-%', 'zaimozaime-%'] }
-  };
-  const conf = P[project];
+  if (project === 'other') {
+    const others = dbutil.allProjectPrefixes(db).map(pf => (pf.endsWith('%') ? pf : pf + '%'));
+    const notLike = others.map(pf => `${a}task_id NOT LIKE ?`);
+    // 历史任务（不匹配任何项目前缀）也排除到 other 之外由 other 展示；
+    // notLike 条件间 AND：不属于任何已知项目
+    return { sql: notLike.length ? ' AND (' + notLike.join(' AND ') + ')' : '', params: others };
+  }
+  const conf = getProjectConf(project);
   if (!conf) return { sql: '', params: [] };
-  if (conf.like) return { sql: ' AND (' + conf.like.map(l => `${a}task_id LIKE ?`).join(' OR ') + ')', params: conf.like };
-  if (conf.notLike) return { sql: ' AND (' + conf.notLike.map(l => `${a}task_id NOT LIKE ?`).join(' AND ') + ')', params: conf.notLike };
-  return { sql: '', params: [] };
+  const like = conf.prefixes.map(pf => `${a}task_id LIKE ?`);
+  return { sql: ' AND (' + like.join(' OR ') + ')', params: conf.prefixes };
+}
+
+// 动态构建「擅长项目」CASE 表达式（从 projects 表缓存生成，替换原两处硬编码 CASE WHEN）
+// 返回 SQL CASE 片段（不含 WHEN/ELSE 前的 CASE 关键字，含 END）。前缀已带 %，直接 LIKE。
+function buildTopProjCase() {
+  const whens = PROJECT_CACHE
+    .filter(p => p.key !== 'tool') // tool 是别名不入缓存（种子无），防御
+    .map(p => {
+      const conds = p.prefixes.map(pf => `t.task_id LIKE '${pf.replace(/'/g, "''")}'`).join(' OR ');
+      return `WHEN ${conds} THEN '${String(p.name).replace(/'/g, "''")}'`;
+    });
+  return 'CASE ' + whens.join(' ') + " ELSE '其他' END";
 }
 
 // ─── 取数据（可按工作区/项目过滤）────────────────────────────
@@ -145,28 +181,19 @@ function getData(workspace, project) {
         GROUP BY t.assignee ORDER BY completed DESC, avg_total DESC
       `).all(...pj.params));
 
-  // 擅长项目（各冒险者完成最多的项目）
+  // 擅长项目（各冒险者完成最多的项目）— opt-015: CASE 从 projects 表动态生成
+  const topProjCaseSql = buildTopProjCase();
   const topProjRows = (wsId
     ? db.prepare(`
         SELECT t.assignee,
-               CASE WHEN t.task_id LIKE 'zhaoxi-%' THEN '项目A'
-                    WHEN t.task_id LIKE 'tool-%' THEN '工具链'
-                    WHEN t.task_id LIKE 'quest-%' OR t.task_id LIKE 'ai-%' OR t.task_id LIKE 'opt-%'
-                      OR t.task_id LIKE 'g001-%' OR t.task_id LIKE 'g003-%' OR t.task_id LIKE 'fix-%' THEN '冒险公会'
-                    WHEN t.task_id LIKE 'zaima-%' OR t.task_id LIKE 'zaimozaime-%' THEN '项目B'
-                    ELSE '其他' END proj, COUNT(*) c
+               ${topProjCaseSql} proj, COUNT(*) c
         FROM tasks t
         WHERE t.status='completed' AND t.assignee IS NOT NULL AND t.assignee != '' AND t.workspace_id = ?${pj.sql}
         GROUP BY t.assignee, proj ORDER BY t.assignee, c DESC
       `).all(wsId, ...pj.params)
     : db.prepare(`
         SELECT t.assignee,
-               CASE WHEN t.task_id LIKE 'zhaoxi-%' THEN '项目A'
-                    WHEN t.task_id LIKE 'tool-%' THEN '工具链'
-                    WHEN t.task_id LIKE 'quest-%' OR t.task_id LIKE 'ai-%' OR t.task_id LIKE 'opt-%'
-                      OR t.task_id LIKE 'g001-%' OR t.task_id LIKE 'g003-%' OR t.task_id LIKE 'fix-%' THEN '冒险公会'
-                    WHEN t.task_id LIKE 'zaima-%' OR t.task_id LIKE 'zaimozaime-%' THEN '项目B'
-                    ELSE '其他' END proj, COUNT(*) c
+               ${topProjCaseSql} proj, COUNT(*) c
         FROM tasks t
         WHERE t.status='completed' AND t.assignee IS NOT NULL AND t.assignee != ''${pj.sql}
         GROUP BY t.assignee, proj ORDER BY t.assignee, c DESC
@@ -181,6 +208,21 @@ function getData(workspace, project) {
   const allAssignees = [...new Set(tasks.map(t => t.assignee).filter(Boolean))];
   const allCreators = [...new Set(tasks.map(t => (t.created_by || '').trim() || '未知'))].sort();
 
+  // opt-022: JOIN agents 表 → 排行表带 RPG 积分（等级/经验/金币/连击）
+  try {
+    const agentMap = {};
+    db.prepare('SELECT name, exp, level, combo, coins FROM agents').all()
+      .forEach(a => { agentMap[a.name] = a; });
+    modelScores.forEach(m => {
+      const a = agentMap[m.assignee] || {};
+      m.exp = a.exp ?? 0;
+      m.level = a.level ?? 0;
+      m.combo = a.combo ?? 0;
+      m.coins = a.coins ?? 0;
+    });
+  } catch (e) { /* agents 表缺失时排行照常展示（积分为 0） */ }
+
+
   // 每日完成趋势（统计仪表盘）
   const completedTrend = (wsId
     ? db.prepare(`SELECT substr(completed_at,1,10) d, COUNT(*) c FROM tasks
@@ -189,6 +231,41 @@ function getData(workspace, project) {
                   WHERE status='completed' AND completed_at != '' AND 1=1${pjRaw.sql} GROUP BY d ORDER BY d`).all(...pjRaw.params));
 
   return { statMap, total, tasks, modelScores, allAssignees, allCreators, redoTasks, redoCount, completedTrend, wsId };
+}
+
+// opt-026: 审查通过结算（难度定基础奖励 + 连击每连+5%封顶+100%，20连封顶）
+// 与 CLI task.mjs settleRewards 同口径：1⭐5/10、2⭐10/20、3⭐20/35、4⭐35/55、5⭐50/80
+const DIFFICULTY_REWARDS = {
+  1: { exp: 5, coins: 10 },
+  2: { exp: 10, coins: 20 },
+  3: { exp: 20, coins: 35 },
+  4: { exp: 35, coins: 55 },
+  5: { exp: 50, coins: 80 }
+};
+function settleRewards(assignee, difficulty) {
+  const d = Math.max(1, Math.min(5, parseInt(difficulty, 10) || 3));
+  const base = DIFFICULTY_REWARDS[d];
+  const agent = db.prepare('SELECT exp, level, combo, coins FROM agents WHERE name=?').get(assignee);
+  const oldExp = agent ? (agent.exp || 0) : 0;
+  const oldLevel = agent ? (agent.level || 1) : 1;
+  const oldCombo = agent ? (agent.combo || 0) : 0;
+  const oldCoins = agent ? (agent.coins || 0) : 0;
+  const newCombo = oldCombo + 1;
+  const comboBonus = Math.min(newCombo * 0.05, 1.0);
+  const expGain = Math.floor(base.exp * (1 + comboBonus));
+  const coinGain = Math.floor(base.coins * (1 + comboBonus));
+  const newExp = oldExp + expGain;
+  const newLevel = Math.floor(Math.sqrt(newExp / 50)) + 1;
+  const newCoins = oldCoins + coinGain;
+  db.prepare(`INSERT INTO agents (name, total_tasks, avg_score, exp, level, combo, coins, created_at)
+              VALUES (?, 0, 0, ?, ?, ?, ?, datetime('now','localtime'))
+              ON CONFLICT(name) DO UPDATE SET exp=excluded.exp, level=excluded.level, combo=excluded.combo, coins=excluded.coins`)
+    .run(assignee, newExp, newLevel, newCombo, newCoins);
+  return { difficulty: d, baseExp: base.exp, baseCoins: base.coins, expGain, coinGain, newExp, newLevel, newCombo, newCoins, levelUp: newLevel > oldLevel, comboBonus };
+}
+function difficultyLabelHtml(d) {
+  const n = Math.max(1, Math.min(5, parseInt(d, 10) || 3));
+  return '⭐'.repeat(n);
 }
 
 // ─── /api/state 组装（客户端据此渲染整个页面）────────────
@@ -213,7 +290,7 @@ function buildState(workspace, project) {
     // 完整任务数据（客户端渲染卡片，含评分与工作区）
     tasks: d.tasks.map(t => ({
       task_id: t.task_id, title: t.title, description: t.description, status: t.status,
-      assignee: t.assignee, priority: t.priority, depends_on: t.depends_on, result: t.result,
+      assignee: t.assignee, priority: t.priority, difficulty: t.difficulty, depends_on: t.depends_on, result: t.result,
       notes: t.notes, created_at: t.created_at, claimed_at: t.claimed_at, completed_at: t.completed_at,
       original_assignee: t.original_assignee, rejected_by: t.rejected_by, rejected_at: t.rejected_at,
       reject_reason: t.reject_reason, reworked_by: t.reworked_by, reworked_at: t.reworked_at,
@@ -328,9 +405,11 @@ const server = http.createServer((req, res) => {
     } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
   }
   if (p === '/api/workspaces') {
-    return sendJson(res, 200, { ok: true, workspaces: dbutil.getWorkspaces(db) });
+    try {
+      return sendJson(res, 200, { ok: true, workspaces: dbutil.getWorkspaces(db) });
+    } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
   }
-  // GET /api/recruit — 生成接入提示词（冒险者招募令 / 工会会长上岗提示词），一键复制
+  // GET /api/recruit — 生成接入提示词（总会长/执事/冒险者），一键复制（opt-028 三级角色）
   if (p === '/api/recruit' && req.method === 'GET') {
     try {
       const readDoc = (name) => {
@@ -339,30 +418,29 @@ const server = http.createServer((req, res) => {
       };
       return sendJson(res, 200, {
         ok: true,
-        adventurer: readDoc('RECRUIT.md'),
+        chief: readDoc('CHIEF_PROTOCOL.md'),
         leader: readDoc('LEADER_PROTOCOL.md'),
-        workerApi: readDoc('AI_WORKER_PROTOCOL.md')
+        adventurer: readDoc('RECRUIT.md')
       });
     } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
   }
 
-  // GET /api/memory?kw=&limit=&project= — 项目记忆（共享项目记忆库优先 + 本地库），可按键词/项目过滤
+  // GET /api/memory?kw=&limit=&project= — 项目记忆（共享记忆库全局显示 + 软件记忆按项目过滤）
   if (p === '/api/memory' && req.method === 'GET') {
     try {
       const kw = String(url.searchParams.get('kw') || '').trim();
-      const limit = Math.min(parseInt(url.searchParams.get('limit'), 10) || 10, 30);
+      const limit = Math.min(parseInt(url.searchParams.get('limit'), 10) || 50, 200);
       const project = String(url.searchParams.get('project') || 'all').trim();
-      const shared = sharedMemory.search(kw, limit, project);
+      const shared = sharedMemory.search(kw, limit, 'all'); // 共享记忆库全局显示，不随项目切换过滤
       const q = `%${kw}%`;
       const local = db.prepare(
         `SELECT type,title,content,importance,created_at,tags FROM memories
          WHERE (title LIKE ? OR content LIKE ?) AND status='active'
-         ORDER BY importance DESC, created_at DESC LIMIT ?`
-      ).all(q, q, limit * 4);
+         ORDER BY created_at DESC, rowid DESC LIMIT ?` // opt-018: 时间倒序
+      ).all(q, q, limit * 2);
       const localF = local
         .map(r => ({ ...r, project: sharedMemory.projectOf(r.title, r.content, r.tags), projectName: sharedMemory.projectName(sharedMemory.projectOf(r.title, r.content, r.tags)) }))
-        .filter(r => project === 'all' || r.project === project)
-        .slice(0, limit);
+        .slice(0, limit); // 软件记忆也全局显示，不按项目过滤（控制经验是通用的）
       return sendJson(res, 200, {
         ok: true,
         kw,
@@ -372,6 +450,55 @@ const server = http.createServer((req, res) => {
         sharedAvailable: sharedMemory.exists(),
         projects: [{ key: 'all', name: '全部' }].concat(sharedMemory.PROJECTS.map(p => ({ key: p.key, name: p.name }))).concat([{ key: 'other', name: '其他' }])
       });
+    } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+  }
+  // GET /api/memory/decisions?limit= — 最近的经验沉淀决策记录（opt-005，本地共享库）
+  if (p === '/api/memory/decisions' && req.method === 'GET') {
+    try {
+      const limit = Math.min(parseInt(url.searchParams.get('limit'), 10) || 12, 50);
+      return sendJson(res, 200, {
+        ok: true,
+        rows: sharedMemory.recentDecisions(limit),
+        sharedAvailable: sharedMemory.exists()
+      });
+    } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+  }
+  if (p === '/api/reports' && req.method === 'GET') {
+    // 报表数据：完成趋势（按天聚合，前端可再合并为周/月）+ 执行人产能 + 状态分布
+    try {
+      const trend = db.prepare(`SELECT substr(completed_at,1,10) AS d, COUNT(*) AS c
+        FROM tasks WHERE status='completed' AND completed_at != '' GROUP BY d ORDER BY d`).all();
+      const assignees = db.prepare(`SELECT assignee,
+          SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
+          SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) AS in_progress,
+          SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+          COUNT(*) AS total
+        FROM tasks WHERE assignee != '' GROUP BY assignee ORDER BY completed DESC, total DESC LIMIT 20`).all();
+      const statuses = db.prepare('SELECT status, COUNT(*) AS c FROM tasks GROUP BY status').all();
+      return sendJson(res, 200, { ok: true, trend, assignees, statuses });
+    } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+  }
+  if (p === '/api/export' && req.method === 'GET') {
+    // 导出全部任务为 CSV / JSON
+    try {
+      const rows = db.prepare('SELECT * FROM tasks ORDER BY task_id').all();
+      const fmt = (url.searchParams.get('format') || 'json').toLowerCase();
+      let body, type, ext;
+      if (fmt === 'csv') {
+        const cols = ['task_id', 'title', 'status', 'priority', 'assignee', 'created_at', 'claimed_at', 'completed_at', 'description', 'result', 'notes'];
+        const escCsv = v => { v = String(v == null ? '' : v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+        body = '\uFEFF' + cols.join(',') + '\r\n' + rows.map(r => cols.map(c => escCsv(r[c])).join(',')).join('\r\n');
+        type = 'text/csv; charset=utf-8'; ext = 'csv';
+      } else {
+        body = JSON.stringify({ exported_at: new Date().toISOString(), total: rows.length, tasks: rows }, null, 2);
+        type = 'application/json; charset=utf-8'; ext = 'json';
+      }
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '_');
+      res.writeHead(200, {
+        'Content-Type': type,
+        'Content-Disposition': `attachment; filename="guild_tasks_${stamp}.${ext}"`,
+      });
+      return res.end(body);
     } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
   }
   if (p === '/api/config' && req.method === 'GET') {
@@ -398,12 +525,14 @@ const server = http.createServer((req, res) => {
     });
   }
   if (p === '/api/task') {
-    const taskId = url.searchParams.get('task_id');
-    if (!taskId) return sendJson(res, 400, { ok: false, error: '缺少 task_id' });
-    const t = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId);
-    if (!t) return sendJson(res, 404, { ok: false, error: `任务 ${taskId} 不存在` });
-    const score = db.prepare('SELECT * FROM task_scores WHERE task_id = ?').get(taskId);
-    return sendJson(res, 200, { ok: true, task: t, score, workspace: dbutil.workspaceNameOf(db, t.workspace_id) });
+    try {
+      const taskId = url.searchParams.get('task_id');
+      if (!taskId) return sendJson(res, 400, { ok: false, error: '缺少 task_id' });
+      const t = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId);
+      if (!t) return sendJson(res, 404, { ok: false, error: `任务 ${taskId} 不存在` });
+      const score = db.prepare('SELECT * FROM task_scores WHERE task_id = ?').get(taskId);
+      return sendJson(res, 200, { ok: true, task: t, score, workspace: dbutil.workspaceNameOf(db, t.workspace_id) });
+    } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
   }
 
   if (p === '/api/reset' && req.method === 'POST') {
@@ -423,8 +552,154 @@ const server = http.createServer((req, res) => {
         const newNotes = (task.notes ? task.notes + '\n' : '') + logLine;
         db.prepare(`UPDATE tasks SET status='pending', assignee='', claimed_at='', notes=? WHERE task_id=?`).run(newNotes, taskId);
         console.log(`🔄 看板重置任务 ${taskId}（原负责人 ${oldAssignee}）`);
+        // opt-005: 决策沉淀（异步写共享记忆库，失败不阻塞）
+        try { sharedMemory.decision(taskId, '重置', `重置进行中任务，释放原负责人 ${oldAssignee}`, '公会会长（看板）'); } catch (e) {}
         sendJson(res, 200, { ok: true, task_id: taskId, released: oldAssignee });
       } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+    })();
+  }
+
+  // POST /api/cancel — 取消/终止任务（tool-014：终止闭环，与 CLI cancel 同逻辑）
+  if (p === '/api/cancel' && req.method === 'POST') {
+    return (async () => {
+      try {
+        const body = await readJsonBody(req);
+        const taskId = String(body.task_id || '').trim();
+        const reason = String(body.reason || '').trim() || '未知原因';
+        const by = String(body.by || '').trim() || '公会会长（看板）';
+        if (!taskId) return sendJson(res, 400, { ok: false, error: '缺少 task_id' });
+        const r = db.prepare('SELECT status, assignee, title FROM tasks WHERE task_id=?').get(taskId);
+        if (!r) return sendJson(res, 404, { ok: false, error: '任务 ' + taskId + ' 不存在' });
+        const allowed = ['pending', 'in_progress', 'review', 'failed'];
+        if (r.status === 'completed') {
+          return sendJson(res, 409, { ok: false, error: '任务 ' + taskId + ' 已完成（历史不可改），无法取消' });
+        }
+        if (!allowed.includes(r.status)) {
+          return sendJson(res, 409, { ok: false, error: '只能取消 ' + allowed.map(s => statusLabel[s] || s).join('/') + ' 的任务，当前状态：' + (statusLabel[r.status] || r.status) });
+        }
+        const now = new Date().toLocaleString('zh-CN');
+        const cleanTitle = String(r.title || '').replace(/^\[重做\]/, '').trim();
+        const logLine = '[' + now + '] ⛔ 已取消：' + reason + '（操作人：' + by + '）';
+        const newResult = (r.result || '').trim() ? (r.result || '').trim() + '\n' + logLine : logLine;
+        const info = db.prepare(`UPDATE tasks SET status='cancelled', assignee='', claimed_at='',
+                               title=?, result=?, completed_at=?, reworked_by='', reworked_at=''
+                               WHERE task_id=? AND status IN ('pending','in_progress','review','failed')`)
+          .run(cleanTitle, newResult, now, taskId);
+        if (info.changes === 0) {
+          return sendJson(res, 409, { ok: false, error: '取消失败：任务 ' + taskId + ' 状态已变化，请刷新重试' });
+        }
+        if (r.assignee) {
+          db.prepare(`INSERT INTO agents (name, total_tasks, avg_score, exp, level, combo, created_at)
+                      VALUES (?, 0, 0, 0, 1, 0, datetime('now','localtime'))
+                      ON CONFLICT(name) DO UPDATE SET combo=0`).run(r.assignee);
+        }
+        console.log('⛔ 看板取消任务 ' + taskId + '（' + by + '）：' + reason.slice(0, 50));
+        // opt-005: 决策沉淀（异步写共享记忆库，失败不阻塞）
+        try { sharedMemory.decision(taskId, '取消', reason + '（由 ' + by + ' 取消，原状态 ' + (statusLabel[r.status] || r.status) + (r.assignee ? '，原负责人 ' + r.assignee : '') + '）', by); } catch (e) {}
+        sendJson(res, 200, { ok: true, task_id: taskId, status: 'cancelled', released: r.assignee || '' });
+      } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+    })();
+  }
+
+  // ─── opt-015: 项目动态管理 CRUD ───
+  // GET /api/projects — 项目列表（从 projects 表读，prefixes 为原始前缀数组）
+  if (p === '/api/projects' && req.method === 'GET') {
+    try {
+      const rows = dbutil.listProjects(db); // 返回原始前缀（无 %）
+      const stats = db.prepare('SELECT task_id FROM tasks').all();
+      const withCount = rows.map(proj => {
+        const cnt = stats.filter(t => proj.prefixes.some(pf => t.task_id.startsWith(pf))).length;
+        return { ...proj, task_count: cnt };
+      });
+      return sendJson(res, 200, { ok: true, projects: withCount });
+    } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+  }
+
+  // POST /api/projects — 新增项目
+  if (p === '/api/projects' && req.method === 'POST') {
+    return (async () => {
+      try {
+        const body = await readJsonBody(req);
+        const key = String(body.key || '').trim();
+        const name = String(body.name || '').trim();
+        const leader = String(body.leader || '').trim();
+        const rawPrefixes = Array.isArray(body.prefixes) ? body.prefixes.map(x => String(x).trim()).filter(Boolean) : [];
+        const sortOrder = parseInt(body.sort_order, 10) || 0;
+        if (!key || !name) return sendJson(res, 400, { ok: false, error: '项目 key 与名称不能为空' });
+        if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(key)) return sendJson(res, 400, { ok: false, error: 'key 只能含字母/数字/下划线/中划线且字母开头' });
+        const reserved = ['all', 'other', 'tool', 'guild'];
+        if (reserved.includes(key)) return sendJson(res, 400, { ok: false, error: key + ' 是保留项目名，不可新增' });
+        if (rawPrefixes.length === 0) return sendJson(res, 400, { ok: false, error: '至少需要一个 task_id 前缀（如 testx-）' });
+        if (dbutil.getProject(db, key)) return sendJson(res, 409, { ok: false, error: '项目 ' + key + ' 已存在' });
+        // 前缀冲突校验：与现有项目（含保留 tool 别名映射的 guild）不能重
+        const others = dbutil.allProjectPrefixes(db);
+        const norm = rawPrefixes.map(x => (x.endsWith('-') ? x : x + '-'));
+        for (const np of norm) {
+          if (others.includes(np)) return sendJson(res, 400, { ok: false, error: '前缀 ' + np + ' 已被其他项目占用' });
+        }
+        db.prepare(`INSERT INTO projects (key, name, prefixes, leader, sort_order, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, datetime('now','localtime'), datetime('now','localtime'))`)
+          .run(key, name, JSON.stringify(norm), leader, sortOrder);
+        loadProjectCache();
+        console.log('🆕 项目已新增: ' + key + '（' + name + '，前缀 ' + norm.join(',') + '）');
+        return sendJson(res, 200, { ok: true, key, name, prefixes: norm });
+      } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+    })();
+  }
+
+  // PUT /api/projects/:key — 修改项目
+  if (p.startsWith('/api/projects/') && req.method === 'PUT') {
+    return (async () => {
+      try {
+        const key = decodeURIComponent(p.slice('/api/projects/'.length));
+        const body = await readJsonBody(req);
+        const name = String(body.name ?? '').trim();
+        const leader = String(body.leader ?? '').trim();
+        const rawPrefixes = Array.isArray(body.prefixes) ? body.prefixes.map(x => String(x).trim()).filter(Boolean) : null;
+        const sortOrder = body.sort_order !== undefined && body.sort_order !== null ? parseInt(body.sort_order, 10) : null;
+        const existing = dbutil.getProject(db, key);
+        if (!existing) return sendJson(res, 404, { ok: false, error: '项目 ' + key + ' 不存在' });
+        const nextName = name || existing.name;
+        const nextLeader = leader !== '' ? leader : existing.leader;
+        const nextSort = sortOrder !== null ? sortOrder : existing.sort_order;
+        let nextPrefixes = existing.prefixes;
+        if (rawPrefixes) {
+          const norm = rawPrefixes.map(x => (x.endsWith('-') ? x : x + '-'));
+          if (norm.length === 0) return sendJson(res, 400, { ok: false, error: '至少需要一个前缀' });
+          const others = dbutil.allProjectPrefixes(db, key);
+          for (const np of norm) {
+            if (others.includes(np)) return sendJson(res, 400, { ok: false, error: '前缀 ' + np + ' 已被其他项目占用' });
+          }
+          nextPrefixes = norm;
+        }
+        db.prepare(`UPDATE projects SET name=?, prefixes=?, leader=?, sort_order=?, updated_at=datetime('now','localtime')
+                    WHERE key=?`).run(nextName, JSON.stringify(nextPrefixes), nextLeader, nextSort, key);
+        loadProjectCache();
+        console.log('✏️ 项目已修改: ' + key + ' → ' + nextName);
+        return sendJson(res, 200, { ok: true, key, name: nextName, prefixes: nextPrefixes });
+      } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+    })();
+  }
+
+  // DELETE /api/projects/:key — 删除项目（guild/all/other 保护 + 有任务时警告）
+  if (p.startsWith('/api/projects/') && req.method === 'DELETE') {
+    return (async () => {
+      try {
+        const key = decodeURIComponent(p.slice('/api/projects/'.length));
+        const reserved = ['all', 'other', 'tool', 'guild'];
+        if (reserved.includes(key)) return sendJson(res, 400, { ok: false, error: key + ' 是保留项目名，不可删除' });
+        const existing = dbutil.getProject(db, key);
+        if (!existing) return sendJson(res, 404, { ok: false, error: '项目 ' + key + ' 不存在' });
+        const taskCnt = db.prepare('SELECT COUNT(*) as cnt FROM tasks').all()[0].cnt;
+        const related = taskCnt > 0
+          ? db.prepare('SELECT COUNT(*) as cnt FROM tasks WHERE ' + existing.prefixes.map(pf => "task_id LIKE ?").join(' OR '))
+              .get(...existing.prefixes.map(pf => pf + '%')).cnt
+          : 0;
+        db.prepare('DELETE FROM projects WHERE key=?').run(key);
+        loadProjectCache();
+        console.log('🗑️ 项目已删除: ' + key + (related > 0 ? '（关联 ' + related + ' 个任务将失去项目归属，落入“其他”）' : ''));
+        return sendJson(res, 200, { ok: true, key, related_tasks: related });
+      } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
     })();
   }
 
@@ -437,7 +712,13 @@ const server = http.createServer((req, res) => {
         if (!title) return sendJson(res, 400, { ok: false, error: '标题不能为空' });
         if (!description) return sendJson(res, 400, { ok: false, error: '描述不能为空' });
         const priority = [0, 1, 2].includes(parseInt(body.priority, 10)) ? parseInt(body.priority, 10) : 1;
-        const prefix = (cfg.tasks.allowedPrefixes || []).includes(body.prefix) ? body.prefix : cfg.tasks.defaultPrefix;
+        // opt-026: 难度（1-5星，默认 3）
+        const diffN = parseInt(body.difficulty, 10);
+        const difficulty = (!isNaN(diffN) && diffN >= 1 && diffN <= 5) ? diffN : 3;
+        // opt-015: 前缀白名单 = config.allowedPrefixes ∪ projects 表所有项目前缀（新项目自动可建任务）
+        const projPrefixes = dbutil.allProjectPrefixes(db).map(pf => pf.replace(/-$/, ''));
+        const knownPrefixes = [...new Set([...(cfg.tasks.allowedPrefixes || []), ...projPrefixes])];
+        const prefix = knownPrefixes.includes(body.prefix) ? body.prefix : cfg.tasks.defaultPrefix;
         const createdBy = String(body.created_by || '').trim() || cfg.tasks.createdByDefault;
         // 工作区（不存在的名称自动创建；空 → 默认工作区）
         let workspaceId = null;
@@ -456,10 +737,117 @@ const server = http.createServer((req, res) => {
           workspaceId = def ? def.id : 1;
         }
         const taskId = genTaskId(prefix);
-        db.prepare(`INSERT INTO tasks (task_id, title, description, priority, created_by, workspace_id) VALUES (?, ?, ?, ?, ?, ?)`)
-          .run(taskId, title, description, priority, createdBy, workspaceId);
+        db.prepare(`INSERT INTO tasks (task_id, title, description, priority, difficulty, created_by, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .run(taskId, title, description, priority, difficulty, createdBy, workspaceId);
         console.log(`✅ 看板新建任务 ${taskId}: ${title}（创建人：${createdBy}，工作区id：${workspaceId}）`);
         sendJson(res, 200, { ok: true, task_id: taskId });
+      } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+    })();
+  }
+
+  // opt-022: GET /api/members — 公会管理层职务表（总会长 + 执事，等级经验与排行表联动）
+  if (p === '/api/members' && req.method === 'GET') {
+    return (async () => {
+      try {
+        const chief = String((cfg.guild && cfg.guild.chiefLeader) || '豆包 (Doubao-MainAgent)');
+        const agentStmt = db.prepare('SELECT name, exp, level, combo, coins FROM agents WHERE name=?');
+        const compStmt = db.prepare("SELECT COUNT(*) c FROM tasks WHERE assignee=? AND status='completed'");
+        const mk = (name, role, project) => {
+          const a = agentStmt.get(name) || { name, exp: 0, level: 0, combo: 0, coins: 0 };
+          const c = compStmt.get(name);
+          return { name, role, project: project || '', level: a.level ?? 0, exp: a.exp ?? 0, coins: a.coins ?? 0, combo: a.combo ?? 0, completed: c ? c.c : 0 };
+        };
+        const members = [mk(chief, 'chief', '')];
+        db.prepare("SELECT key, name, leader FROM projects WHERE leader IS NOT NULL AND trim(leader) != '' ORDER BY sort_order, key")
+          .all()
+          .forEach(pr => members.push(mk(pr.leader, 'vice', pr.name || pr.key)));
+        sendJson(res, 200, { ok: true, chief_leader: chief, members });
+      } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+    })();
+  }
+
+  // ─── opt-030: 反馈系统（双向多角色：冒险者/执事/总会长 互提互收）───
+  // POST /api/feedback          提交反馈
+  // GET  /api/feedback          查看反馈列表（?status=&to_whom=&from_whom= 过滤）
+  // GET  /api/feedback/unread-count  未读数量（?to_whom=）
+  // POST /api/feedback/:id/read     标记已读
+  // POST /api/feedback/:id/resolve  标记已解决
+  if (p === '/api/feedback' && req.method === 'POST') {
+    return (async () => {
+      try {
+        const body = await readJsonBody(req);
+        const content = String(body.content || '').trim();
+        if (!content) return sendJson(res, 400, { ok: false, error: '缺少 content 反馈内容' });
+        const fromWhom = String(body.from_whom || '').trim() || '匿名';
+        const fromRole = ['adventurer', 'leader', 'chief'].includes(body.from_role) ? body.from_role : 'adventurer';
+        const toWhom = String(body.to_whom || '').trim();
+        if (!toWhom) return sendJson(res, 400, { ok: false, error: '缺少 to_whom 反馈对象' });
+        const category = ['bug', '建议', '问题', '汇报', '通知', '其他'].includes(body.category) ? body.category : '其他';
+        const taskId = String(body.task_id || '').trim();
+        const id = crypto.randomUUID();
+        db.prepare(`INSERT INTO feedbacks (id, task_id, from_whom, from_role, to_whom, category, content, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'unread', datetime('now','localtime'))`)
+          .run(id, taskId, fromWhom, fromRole, toWhom, category, content);
+        sharedMemory.decision('feedback-' + id.slice(0, 8), '反馈提交', '[' + fromRole + '] ' + fromWhom + ' → ' + toWhom + '（' + category + '）: ' + content.slice(0, 120), fromWhom);
+        sendJson(res, 200, { ok: true, id });
+      } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+    })();
+  }
+
+  // 反馈列表（先于 :id 前缀路由判断，避免 /unread-count 被当 id）
+  if (p === '/api/feedback/unread-count' && req.method === 'GET') {
+    return (async () => {
+      try {
+        const toWhom = String(url.searchParams.get('to_whom') || '').trim();
+        let row;
+        if (toWhom) {
+          row = db.prepare(`SELECT COUNT(*) c FROM feedbacks WHERE to_whom=? AND status='unread'`).get(toWhom);
+        } else {
+          row = db.prepare(`SELECT COUNT(*) c FROM feedbacks WHERE status='unread'`).get();
+        }
+        sendJson(res, 200, { ok: true, unread: row ? row.c : 0 });
+      } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+    })();
+  }
+
+  if (p === '/api/feedback' && req.method === 'GET') {
+    return (async () => {
+      try {
+        const toWhom = String(url.searchParams.get('to_whom') || '').trim();
+        const status = String(url.searchParams.get('status') || '').trim();
+        const fromWhom = String(url.searchParams.get('from_whom') || '').trim();
+        const role = String(url.searchParams.get('role') || '').trim();
+        const limit = Math.min(parseInt(url.searchParams.get('limit'), 10) || 50, 200);
+        const conds = [];
+        const vals = [];
+        if (toWhom) { conds.push('to_whom=?'); vals.push(toWhom); }
+        if (fromWhom) { conds.push('from_whom=?'); vals.push(fromWhom); }
+        if (role) { conds.push('from_role=?'); vals.push(role); }
+        if (['unread', 'read', 'resolved'].includes(status)) { conds.push('status=?'); vals.push(status); }
+        const where = conds.length ? ' WHERE ' + conds.join(' AND ') : '';
+        const rows = db.prepare('SELECT * FROM feedbacks' + where + ' ORDER BY created_at DESC, rowid DESC LIMIT ?').all(...vals, limit);
+        sendJson(res, 200, { ok: true, list: rows });
+      } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
+    })();
+  }
+
+  // 标记已读 / 已解决（pathname 前缀匹配 :id）
+  if (p.startsWith('/api/feedback/') && (p.endsWith('/read') || p.endsWith('/resolve')) && req.method === 'POST') {
+    return (async () => {
+      try {
+        const seg = p.split('/');
+        // /api/feedback/<id>/read|resolve
+        const id = decodeURIComponent(seg[3] || '');
+        const action = seg[4];
+        if (!id) return sendJson(res, 400, { ok: false, error: '缺少反馈 id' });
+        const exist = db.prepare('SELECT id FROM feedbacks WHERE id=?').get(id);
+        if (!exist) return sendJson(res, 404, { ok: false, error: '反馈不存在' });
+        if (action === 'read') {
+          db.prepare(`UPDATE feedbacks SET status='read', read_at=datetime('now','localtime') WHERE id=?`).run(id);
+        } else {
+          db.prepare(`UPDATE feedbacks SET status='resolved', read_at=datetime('now','localtime'), resolved_at=datetime('now','localtime') WHERE id=?`).run(id);
+        }
+        sendJson(res, 200, { ok: true, id, status: action === 'read' ? 'read' : 'resolved' });
       } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
     })();
   }
@@ -484,7 +872,7 @@ const server = http.createServer((req, res) => {
           vals[k] = v;
         }
         const comment = String(body.comment || '').trim();
-        const reviewer = String(body.reviewer || '').trim() || '总指挥';
+        const reviewer = String(body.reviewer || '').trim() || '公会会长';
         const task = db.prepare('SELECT status, assignee FROM tasks WHERE task_id=?').get(taskId);
         if (!task) return sendJson(res, 404, { ok: false, error: `任务 ${taskId} 不存在` });
         if (task.status !== 'completed') {
@@ -508,6 +896,8 @@ const server = http.createServer((req, res) => {
             .run(task.assignee, st.total_tasks, st.avg_score);
         }
         console.log(`📊 看板评分 ${taskId}: ${dimKeys.map(k => vals[k]).join('/')} → ${total}（${reviewer}）`);
+        // opt-005: 决策沉淀（异步写共享记忆库，失败不阻塞）
+        try { sharedMemory.decision(taskId, '评分', `评分 ${total}（${dimKeys.map(k => `${k}=${vals[k]}`).join('，')}）${comment ? ' 评语：' + comment : ''}`, reviewer); } catch (e) {}
         sendJson(res, 200, { ok: true, task_id: taskId, score_total: total });
       } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
     })();
@@ -535,6 +925,12 @@ const server = http.createServer((req, res) => {
           if (Array.isArray(body.tasks.allowedPrefixes)) t.allowedPrefixes = body.tasks.allowedPrefixes.map(String);
           if (body.tasks.createdByDefault) t.createdByDefault = String(body.tasks.createdByDefault);
           if (Object.keys(t).length) allowed.tasks = t;
+        }
+        // opt-022: 公会管理层配置（总会长，设置页可改）
+        if (body.guild && typeof body.guild === 'object') {
+          const g = {};
+          if (body.guild.chiefLeader !== undefined) g.chiefLeader = String(body.guild.chiefLeader);
+          if (Object.keys(g).length) allowed.guild = g;
         }
         if (body.scoring && typeof body.scoring === 'object') {
           const sc = {};
@@ -651,20 +1047,15 @@ const server = http.createServer((req, res) => {
           return sendJson(res, 409, { ok: false, error: `完成失败：任务状态为 ${r.status}，只有进行中的任务能完成` });
         }
         console.log(`🤖 Worker complete: ${taskId}（已提交，待审查）${result ? ' (' + result.slice(0, 50) + ')' : ''}`);
-        // ── 记忆归档（与 CLI complete 一致）：写本地 + 同步共享项目记忆库 ──
+        // ── 记忆归档（与 CLI complete 一致）：只同步共享记忆库，软件记忆只存总会长控制经验 ──
         try {
           if (cfg.integrations.memoryArchive) {
             const t = db.prepare('SELECT title, description, assignee, priority FROM tasks WHERE task_id=?').get(taskId);
             if (t) {
               const who = t.assignee || '未知';
               const content = `【任务】${taskId} ${t.title}\n【负责人】${who}\n【完成时间】${new Date().toLocaleString('zh-CN')}\n【任务描述】${(t.description || '').slice(0, 300)}\n【完成结果】${result || '（无）'}`;
-              try {
-                db.prepare(`INSERT INTO memories (id, type, title, content, tags, importance, confidence, source, created_at, updated_at)
-                            VALUES (?, 'work_log', ?, ?, ?, ?, 0.9, 'task_pool_api', datetime('now','localtime'), datetime('now','localtime'))`
-                ).run(require('node:crypto').randomUUID(), `[工作记录] ${taskId} ${t.title}`, content, JSON.stringify([taskId, who]), t.priority >= 2 ? 3 : (t.priority >= 1 ? 2 : 1));
-              } catch (e) { console.log('⚠️ 本地记忆归档失败:', e.message); }
               const shr = sharedMemory.archiveLog(content, who);
-              if (shr.ok) console.log(`📚 已完成任务 ${taskId} 已同步到共享项目记忆库`);
+              if (shr.ok) console.log(`📚 已完成任务 ${taskId} 已归档到共享记忆库`);
               else console.log(`⚠️ 共享记忆库写入跳过: ${shr.error || '不可用'}`);
             }
           }
@@ -683,7 +1074,7 @@ const server = http.createServer((req, res) => {
         const action = String(body.action || '').trim();
         if (!taskId) return sendJson(res, 400, { ok: false, error: '缺少 task_id' });
         if (action !== 'approve' && action !== 'reject') return sendJson(res, 400, { ok: false, error: 'action 只能是 approve（通过）或 reject（打回）' });
-        const task = db.prepare('SELECT status, assignee, title, description, result, notes FROM tasks WHERE task_id=?').get(taskId);
+        const task = db.prepare('SELECT status, assignee, title, description, result, notes, difficulty FROM tasks WHERE task_id=?').get(taskId);
         if (!task) return sendJson(res, 404, { ok: false, error: `任务 ${taskId} 不存在` });
         if (task.status !== 'review') return sendJson(res, 409, { ok: false, error: `审查失败：任务状态为 ${task.status}，只能审查「待审查」任务` });
         const reviewer = String(body.reviewer || '审查员').trim();
@@ -708,10 +1099,20 @@ const server = http.createServer((req, res) => {
                         ON CONFLICT(name) DO UPDATE SET combo=0`).run(task.assignee);
           }
           console.log(`🔍 审查打回: ${taskId}（${reviewer}）：${reason.slice(0, 50)}`);
+          // opt-005: 决策沉淀（异步写共享记忆库，失败不阻塞）
+          try { sharedMemory.decision(taskId, '打回', `审查打回，原因：${reason}`, reviewer); } catch (e) {}
           return sendJson(res, 200, { ok: true, task_id: taskId, status: 'pending', action: 'reject' });
         }
         // approve：通过审查 → completed（可选打分）
         db.prepare(`UPDATE tasks SET status='completed' WHERE task_id=?`).run(taskId);
+        // opt-026: 审查通过时结算奖励（难度定基础值 + 连击加成，与 CLI 同口径）
+        let settle = null;
+        if (task.assignee) {
+          try {
+            settle = settleRewards(task.assignee, task.difficulty);
+            console.log(`🎯 审查结算 ${taskId}: ${task.assignee} +${settle.expGain}EXP +${settle.coinGain}金币（难度${difficultyLabelHtml(settle.difficulty)} ${settle.baseExp}基础${settle.comboBonus > 0 ? ` 连击+${Math.round(settle.comboBonus * 100)}%` : ''}）`);
+          } catch (e) { console.log('⚠️ 审查结算异常:', e.message); }
+        }
         const sc = body.score || {};
         if (sc.c !== undefined && sc.c !== null) {
           const c = parseInt(sc.c), q = parseInt(sc.q), v = parseInt(sc.v), r = parseInt(sc.r);
@@ -736,9 +1137,13 @@ const server = http.createServer((req, res) => {
             }
           }
           console.log(`🔍 审查通过+评分: ${taskId}（${reviewer}）：${total}分`);
+          // opt-005: 决策沉淀（异步写共享记忆库，失败不阻塞）
+          try { sharedMemory.decision(taskId, '审查通过+评分', `审查通过并评分 ${total}${comment ? ' 评语：' + comment : ''}`, reviewer); } catch (e) {}
           return sendJson(res, 200, { ok: true, task_id: taskId, status: 'completed', action: 'approve', score_total: total });
         }
         console.log(`🔍 审查通过: ${taskId}（${reviewer}）`);
+        // opt-005: 决策沉淀（异步写共享记忆库，失败不阻塞）
+        try { sharedMemory.decision(taskId, '审查通过', '审查通过（未评分）', reviewer); } catch (e) {}
         sendJson(res, 200, { ok: true, task_id: taskId, status: 'completed', action: 'approve' });
       } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
     })();
@@ -758,7 +1163,14 @@ const server = http.createServer((req, res) => {
           if (!r) return sendJson(res, 404, { ok: false, error: `任务 ${taskId} 不存在` });
           return sendJson(res, 409, { ok: false, error: `失败失败：任务状态为 ${r.status}，只有进行中的任务能标记失败` });
         }
+        // opt-026: 失败清零连击（与 CLI fail 同口径）
+        try {
+          const a = db.prepare('SELECT assignee FROM tasks WHERE task_id=?').get(taskId);
+          if (a && a.assignee) db.prepare('UPDATE agents SET combo=0 WHERE name=?').run(a.assignee);
+        } catch (e2) {}
         console.log(`🤖 Worker fail: ${taskId} — ${reason.slice(0, 50)}`);
+        // opt-005: 决策沉淀（异步写共享记忆库，失败不阻塞）
+        try { sharedMemory.decision(taskId, '失败', `冒险者申报失败：${reason}`, '冒险者（看板）'); } catch (e) {}
         sendJson(res, 200, { ok: true, task_id: taskId, status: 'failed' });
       } catch (e) { sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
     })();
@@ -790,7 +1202,7 @@ const server = http.createServer((req, res) => {
         if (!title || !description || !poster) {
           return sendJson(res, 400, { ok: false, error: '标题、描述、发布者不能为空' });
         }
-        const taskId = dbutil.genGuildTaskId();
+        const taskId = dbutil.genGuildTaskId(db);
         db.prepare(`INSERT INTO guild_tasks (task_id, title, description, poster, reward_coins, reward_exp, priority, status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'open')`)
           .run(taskId, title, description, poster, rewardCoins, rewardExp, priority);
@@ -866,6 +1278,8 @@ const server = http.createServer((req, res) => {
         if (info.changes === 0) {
           return sendJson(res, 404, { ok: false, error: `任务 ${taskId} 不存在或已完成` });
         }
+        // opt-005: 决策沉淀（异步写共享记忆库，失败不阻塞）
+        try { sharedMemory.decision(taskId, '取消', '取消公会任务（open/claimed → cancelled）', '公会会长（看板）'); } catch (e) {}
         return sendJson(res, 200, { ok: true, task_id: taskId });
       } catch (e) { return sendJson(res, 500, { ok: false, error: String(e.message || e) }); }
     })();
@@ -900,7 +1314,7 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, { ok: true, status: job.status, output: job.output, error: job.error });
   }
 
-  // POST /api/ai/direct — 总指挥 AI：异步把目标拆解为任务并派发
+  // POST /api/ai/direct — 公会会长 AI：异步把目标拆解为任务并派发
   if (p === '/api/ai/direct' && req.method === 'POST') {
     return (async () => {
       try {
@@ -1042,14 +1456,14 @@ server.listen(PORT, HOST, () => {
 });
 
 // ─── 后台常驻自主执行（Phase 7：目标驱动自主运行模式）───
-// 遍历所有「运行中」的目标：总指挥 AI 只负责「管理」——规划拆任务（发布到池子）、
+// 遍历所有「运行中」的目标：公会会长 AI 只负责「管理」——规划拆任务（发布到池子）、
 // 巡查处置异常任务（重置/取消/补建）、判定目标完成；**不自动执行**。
 // 任务的「执行」留给外部 AI 工人（各自在线主动领取）或人类手动领取。
 // 暂停的目标不管理；支持多个目标并行推进。
 let autoRunWorkers = [];       // 保留（供 /api/ai/status 读取），当前不自动派内置工人
 let autoRunTimer = null;
 let tickRunning = false;
-let lastPatrolAt = 0;          // 总指挥自主巡查的上次时间戳
+let lastPatrolAt = 0;          // 公会会长自主巡查的上次时间戳
 
 async function autoRunTick() {
   const a = cfg.ai || {};
@@ -1070,9 +1484,9 @@ async function autoRunTick() {
     const goals = db.prepare("SELECT * FROM goals WHERE status='active' ORDER BY id").all();
     for (const g of goals) {
       const st = agent.goalStats(g);
-      // 目标下还有待领取或进行中的任务 → 等外部工人/人工领取执行，总指挥不干预
+      // 目标下还有待领取或进行中的任务 → 等外部工人/人工领取执行，公会会长不干预
       if (st.pending > 0 || st.in_progress > 0) continue;
-      // 任务都做完了 → 总指挥规划下一步（拆新任务发布到池子 / 判定完成 / 等待）
+      // 任务都做完了 → 公会会长规划下一步（拆新任务发布到池子 / 判定完成 / 等待）
       const minGapMs = Math.max(60, (a.planIntervalMin || 3) * 60) * 1000;
       let gapOk = true;
       if (g.last_plan_at) {
@@ -1086,16 +1500,16 @@ async function autoRunTick() {
         else console.log(`⏳ 目标「${g.title}」规划：等待（${r.reason}）`);
       }
     }
-    // 3) 总指挥自主巡查：定期审视整个任务池，自主决策 重置/取消/补建 任务
+    // 3) 公会会长自主巡查：定期审视整个任务池，自主决策 重置/取消/补建 任务
     const patrolMin = Math.max(5, parseInt(a.patrolInterval, 10) || 5);
     if (Date.now() - lastPatrolAt > patrolMin * 60 * 1000) {
       lastPatrolAt = Date.now();
       const pr = await agent.patrolTasks();
       if (pr.ok) {
         const n = (pr.actions.reset || []).length + (pr.actions.cancel || []).length + (pr.actions.create || []).length;
-        if (n) console.log(`🔍 总指挥自主巡查完成：重置 ${pr.actions.reset.length}｜取消 ${pr.actions.cancel.length}｜补建 ${pr.actions.create.length}`);
+        if (n) console.log(`🔍 公会会长自主巡查完成：重置 ${pr.actions.reset.length}｜取消 ${pr.actions.cancel.length}｜补建 ${pr.actions.create.length}`);
       } else if (pr.reason && pr.reason !== '任务池无异常，无需巡查') {
-        console.log(`🔍 总指挥自主巡查：${pr.reason}`);
+        console.log(`🔍 公会会长自主巡查：${pr.reason}`);
       }
     }
   } finally {
@@ -1111,7 +1525,7 @@ function startAutoRun() {
   }
   const interval = Math.max(5, parseInt(a.autoRunInterval, 10) || 20) * 1000;
   autoRunTimer = setInterval(autoRunTick, interval);
-  console.log(`🤖 总指挥自主管理已启动：每 ${interval / 1000}s 规划拆任务 + 巡查处置异常任务（执行不自动，由外部工人/人工领取）`);
+  console.log(`🤖 公会会长自主管理已启动：每 ${interval / 1000}s 规划拆任务 + 巡查处置异常任务（执行不自动，由外部工人/人工领取）`);
   autoRunTick(); // 启动后立即跑一次
 }
 
@@ -1132,12 +1546,16 @@ server.on('error', (err) => {
   }
 });
 
-// ========== 崩溃兜底：把致命错误写进 srv-err.log 再退出（看门狗 watchdog.mjs 会自动拉起） ==========
+// ========== 崩溃兜底：把致命错误写进 srv-err.log / server-error.log 再退出（看门狗 watchdog.mjs 会自动拉起） ==========
 function crashLog(label, err) {
   try {
     const ts = new Date().toLocaleString('zh-CN', { hour12: false });
     const msg = `[${ts}] ${label}: ${err && err.stack ? err.stack : String(err)}\n`;
-    require('fs').appendFileSync(require('path').join(__dirname, '..', 'srv-err.log'), msg);
+    const fs = require('fs');
+    const root = require('path').join(__dirname, '..');
+    // 双写：srv-err.log（watchdog spawn stderr 指向，保持兼容）+ server-error.log（fix-004 要求的独立崩溃日志）
+    fs.appendFileSync(require('path').join(root, 'srv-err.log'), msg);
+    try { fs.appendFileSync(require('path').join(root, 'server-error.log'), msg); } catch (e) {}
   } catch (e) { /* 日志写失败不影响退出 */ }
 }
 process.on('uncaughtException', (err) => {

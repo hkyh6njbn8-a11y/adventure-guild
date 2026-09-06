@@ -15,7 +15,7 @@
 //   sm.archiveLog('内容', 'AI名')    → {ok, out}
 //   sm.exists()                      → 公共库是否可用
 
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -55,13 +55,46 @@ function archiveLog(content, who) {
 }
 
 // 项目识别：公共库记忆没有统一项目字段，用 tags/title/content 关键词映射到项目
-const PROJECTS = [
-  { key: 'zhaoxi', name: '项目A', kws: ['zhaoxi'] },
-  { key: 'guild',  name: '冒险公会', kws: ['冒险', '公会', 'quest', '任务看板'] },
-  { key: 'tool',   name: '工具链', kws: ['tool', '工具'] },
-  { key: 'zaima',  name: '项目B', kws: ['zaima', 'zaimozaime'] },
+// opt-015: 优先从主库 projects 表动态加载（新增项目自动可识别），失败/未初始化时回退以下静态种子
+const PROJECT_SEED = [
+  { key: 'zhaoxi', name: '朝夕', kws: ['zhaoxi', '朝夕'] },
+  // opt-011: tool- 前缀已归入冒险公会，不再有独立工具链项目
+  { key: 'guild',  name: '冒险公会', kws: ['冒险', '公会', 'quest', 'task', '任务看板', 'tool', '工具'] },
+  { key: 'zaima',  name: '在么在么', kws: ['zaima', 'zaimozaime', '在么'] },
+  // opt-014: 随心日记项目（suixin- 前缀）
+  { key: 'suixin', name: '随心日记', kws: ['suixin', '随心日记', '随心'] },
 ];
+let PROJECTS = PROJECT_SEED;
+let projectsLoadedAt = 0;
+
+// 从主库 projects 表加载项目（主库与共享库同机不同库：读主库 DB_PATH 的 projects 表）
+// 生成 kws = [key, name, ...前缀去横线]。失败则保留种子。缓存 10s 避免频繁读库。
+function loadProjects() {
+  try {
+    if (Date.now() - projectsLoadedAt < 10000) return PROJECTS;
+    const cfg = require('./config.cjs');
+    if (!cfg.DB_PATH || !fs.existsSync(cfg.DB_PATH)) { projectsLoadedAt = Date.now(); return PROJECTS; }
+    const Database = require('better-sqlite3');
+    const db = new Database(cfg.DB_PATH, { readonly: true });
+    try {
+      const rows = db.prepare('SELECT key, name, prefixes FROM projects ORDER BY sort_order ASC, key ASC').all();
+      if (rows.length > 0) {
+        PROJECTS = rows.map(r => ({
+          key: r.key,
+          name: r.name,
+          kws: [r.key, r.name, ...(JSON.parse(r.prefixes || '[]') || []).map(pf => pf.replace(/-$/, ''))]
+        }));
+      }
+    } finally { db.close(); }
+    projectsLoadedAt = Date.now();
+  } catch (e) {
+    // 主库 projects 表不存在（旧库）或读取失败：保留种子
+    projectsLoadedAt = Date.now();
+  }
+  return PROJECTS;
+}
 function projectOf(title, content, tags) {
+  loadProjects();
   const hay = String(title || '') + ' ' + String(content || '') + ' ' + String(tags || '');
   for (const p of PROJECTS) {
     if (p.kws.some(k => hay.toLowerCase().includes(k.toLowerCase()))) return p.key;
@@ -69,6 +102,7 @@ function projectOf(title, content, tags) {
   return 'other';
 }
 function projectName(key) {
+  loadProjects();
   const p = PROJECTS.find(x => x.key === key);
   return p ? p.name : (key === 'other' ? '其他' : key);
 }
@@ -81,12 +115,12 @@ function search(kw, limit, project) {
     const db = new Database(sharedDbPath(), { readonly: true });
     try {
       const q = `%${(kw || '').trim()}%`;
-      const n = Math.min(parseInt(limit, 10) || 10, 30);
+      const n = Math.min(parseInt(limit, 10) || 50, 200);
       const rows = db.prepare(
         `SELECT type,title,content,importance,created_at,tags FROM memories
          WHERE (title LIKE ? OR content LIKE ?) AND status='active'
-         ORDER BY importance DESC, created_at DESC LIMIT ?`
-      ).all(q, q, n * 4); // 多取一些，JS 层做项目过滤
+         ORDER BY created_at DESC, rowid DESC LIMIT ?` // opt-018: 时间倒序（importance 由前端 ⭐ 标记）
+      ).all(q, q, n * 2); // 多取一些，JS 层做项目过滤
       return rows
         .map(r => ({ ...r, project: projectOf(r.title, r.content, r.tags), projectName: projectName(projectOf(r.title, r.content, r.tags)) }))
         .filter(r => !project || project === 'all' || r.project === project)
@@ -101,4 +135,46 @@ function search(kw, limit, project) {
 // 最近 N 条（不带关键词）
 function recent(limit) { return search('', limit); }
 
-module.exports = { sharedDir, sharedDbPath, exists, archiveLog, search, recent, projectOf, projectName, PROJECTS };
+// ─── 决策经验沉淀（opt-005）────────────────────────────
+// 总指挥在打回/重置/取消/评分/失败时的决策，自动写入共享记忆库。
+// 要求：绝不阻塞业务——异步 spawn，写不进就算了（返回 ok:false，调用方忽略）。
+const DECISION_TAG = '决策,看板';
+
+function decision(taskId, kind, detail, who) {
+  if (!taskId || !kind) return { ok: false, error: '参数不足' };
+  if (!exists()) return { ok: false, error: '共享记忆库不可用' };
+  try {
+    const stamp = new Date().toLocaleString('zh-CN');
+    const title = `【决策·${kind}】${taskId}`;
+    const content = `${detail || ''}（决策者：${who || '总指挥（看板）'}；来源：冒险公会看板；时间：${stamp}）`;
+    const child = spawn(process.execPath,
+      [sharedCli(), 'add', title, content, '--type', 'decision', '--tags', DECISION_TAG, '--who', who || '总指挥（看板）'],
+      { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+    return { ok: true, async: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// 最近 N 条决策记录（只读，供看板统计页展示）
+function recentDecisions(limit) {
+  if (!exists()) return [];
+  try {
+    const Database = require('better-sqlite3');
+    const db = new Database(sharedDbPath(), { readonly: true });
+    try {
+      const n = Math.min(parseInt(limit, 10) || 12, 50);
+      return db.prepare(
+        `SELECT type,title,content,tags,created_at FROM memories
+         WHERE title LIKE '【决策%' AND status='active'
+         ORDER BY created_at DESC, rowid DESC LIMIT ?`
+      ).all(n);
+    } finally { db.close(); }
+  } catch (e) {
+    console.warn('⚠️ 共享记忆库决策读取失败:', e.message);
+    return [];
+  }
+}
+
+module.exports = { sharedDir, sharedDbPath, exists, archiveLog, search, recent, projectOf, projectName, PROJECTS, decision, recentDecisions };

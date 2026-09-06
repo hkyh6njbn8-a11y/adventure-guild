@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -21,7 +21,7 @@
       <button class="nav-item active" data-view="board" onclick="switchView('board')">
         <span class="nav-ico">🗺️</span><span>任务看板</span>
       </button>
-      <button class="nav-item" data-view="memory" onclick="switchView('memory')">
+            <button class="nav-item" data-view="memory" onclick="switchView('memory')">
         <span class="nav-ico">📚</span><span>项目记忆</span>
       </button>
       <button class="nav-item" data-view="recruit" onclick="switchView('recruit')">
@@ -55,10 +55,10 @@
           <label class="ws-label">🏰 项目</label>
           <select class="workspace-select" id="projectSelect" onchange="onProjectChange(this.value)" title="按项目切换——任务/统计/排行/记忆全部独立隔离">
             <option value="all">🌐 全部项目</option>
-            <option value="zhaoxi">项目A</option>
+            <option value="zhaoxi">朝夕</option>
             <option value="guild">冒险公会</option>
-            <option value="tool">工具链</option>
-            <option value="zaima">项目B</option>
+            <option value="zaima">在么在么</option>
+            <option value="suixin">随心日记</option>
             <option value="other">其他</option>
           </select>
         </div>
@@ -70,29 +70,45 @@
 
     <!-- ========== 视图：任务看板 ========== -->
     <main class="view" id="viewBoard">
-      <div class="filter-bar">
-        <span class="filter-tab active" data-filter="all" onclick="filterByStatus('all')">全部 <span class="count" data-c="all">0</span></span>
-        <span class="filter-tab" data-filter="in_progress" onclick="filterByStatus('in_progress')">🔄 进行中 <span class="count" data-c="in_progress">0</span></span>
-        <span class="filter-tab" data-filter="pending" onclick="filterByStatus('pending')">⏳ 待领取 <span class="count" data-c="pending">0</span></span>
-        <span class="filter-tab" data-filter="review" onclick="filterByStatus('review')">🔍 待审查 <span class="count" data-c="review">0</span></span>
-        <span class="filter-tab" data-filter="completed" onclick="filterByStatus('completed')">✅ 已完成 <span class="count" data-c="completed">0</span></span>
-        <span class="filter-tab" data-filter="failed" onclick="filterByStatus('failed')">❌ 失败 <span class="count" data-c="failed">0</span></span>
-        <span class="filter-tab" data-filter="redo" onclick="filterByStatus('redo')">🔄 重做 <span class="count" data-c="redo">0</span></span>
-        <div class="filter-right">
-          <div id="assigneeFilter" class="chip-row"></div>
-          <select class="creator-select" id="creatorSelect" onchange="onCreatorChange(this.value)" title="按创建人筛选">
-            <option value="">👤 全部创建人</option>
-          </select>
-          <span class="clear-filter" id="clearFilter" style="display:none" onclick="clearFilters()">✕ 清除筛选</span>
+      <!-- opt-009: 顶部合并面板 = 筛选栏 + 统计卡 + 执行AI排行表 -->
+      <div class="top-panel" id="topPanel">
+        <div class="panel-head">
+          <span class="panel-title" id="panelTitle">🎛️ 筛选与排行</span>
+          <span class="panel-sub" id="panelSub"></span>
+          <button class="rank-btn expand-btn" id="panelHeadBtn" onclick="togglePanelExpand()" style="margin-left:auto" title="展开/收起筛选栏与执行AI排行">展开筛选与排行 ▾</button>
         </div>
+        <div class="filter-bar" id="filterBar">
+          <span class="filter-tab active" data-filter="all" onclick="filterByStatus('all')">全部 <span class="count" data-c="all">0</span></span>
+          <span class="filter-tab" data-filter="in_progress" onclick="filterByStatus('in_progress')">🔄 进行中 <span class="count" data-c="in_progress">0</span></span>
+          <span class="filter-tab" data-filter="pending" onclick="filterByStatus('pending')">⏳ 待领取 <span class="count" data-c="pending">0</span></span>
+          <span class="filter-tab" data-filter="review" onclick="filterByStatus('review')">🔍 待审查 <span class="count" data-c="review">0</span></span>
+          <span class="filter-tab" data-filter="completed" onclick="filterByStatus('completed')">✅ 已完成 <span class="count" data-c="completed">0</span></span>
+          <span class="filter-tab" data-filter="failed" onclick="filterByStatus('failed')">❌ 失败 <span class="count" data-c="failed">0</span></span>
+          <span class="filter-tab" data-filter="redo" onclick="filterByStatus('redo')">🔄 重做 <span class="count" data-c="redo">0</span></span>
+          <div class="filter-right">
+            <input type="search" id="taskSearch" class="task-search" placeholder="🔍 搜索 ID / 标题 / 执行人…" autocomplete="off" oninput="onTaskSearch(this.value)" title="按任务ID / 标题 / 执行人搜索，匹配处高亮">
+            <select class="creator-select" id="prioritySelect" onchange="onPriorityChange(this.value)" title="按优先级筛选">
+              <option value="">◈ 全部优先级</option>
+              <option value="2">● 高</option>
+              <option value="1">● 中</option>
+              <option value="0">● 低</option>
+            </select>
+            <div id="assigneeFilter" class="chip-row"></div>
+            <select class="creator-select" id="creatorSelect" onchange="onCreatorChange(this.value)" title="按创建人筛选">
+              <option value="">👤 全部创建人</option>
+            </select>
+            <span class="clear-filter" id="clearFilter" style="display:none" onclick="clearFilters()">✕ 清除筛选</span>
+          </div>
+        </div>
+        <!-- opt-009: 执行AI排行表渲染于此（与筛选栏同面板），下方是统计卡 -->
+        <div class="model-panel" id="modelPanel"></div>
+        <div class="stats-bar" id="statsBar"></div>
       </div>
-
-      <div class="stats-bar" id="statsBar"></div>
       <div id="taskSections"></div>
       <div id="emptyHint" class="empty-hint" style="display:none">没有符合筛选条件的任务</div>
     </main>
 
-    <!-- ========== 视图：项目记忆（共享项目记忆库 + 本地库） ========== -->
+    <!-- ========== 视图：项目记忆（本地共享记忆库 + 软件记忆） ========== -->
     <main class="view" id="viewMemory" style="display:none">
       <div class="stats-title">📚 项目记忆</div>
       <div class="mem-bar">
@@ -101,18 +117,30 @@
         <button class="btn ghost" onclick="loadMemoryRecent()">🕐 最近记录</button>
         <span class="mem-hint" id="memHint"></span>
       </div>
+      <div class="mem-type-tabs" id="memTypeTabs">
+        <button class="mem-tab active" data-type="all" onclick="setMemType('all')">全部</button>
+        <button class="mem-tab" data-type="work_log" onclick="setMemType('work_log')">📋 工作日志</button>
+        <button class="mem-tab" data-type="decision" onclick="setMemType('decision')">🎯 决策经验</button>
+        <button class="mem-tab" data-type="knowledge" onclick="setMemType('knowledge')">📚 项目知识</button>
+        <button class="mem-tab" data-type="preference" onclick="setMemType('preference')">⚙️ 用户偏好</button>
+        <button class="mem-tab" data-type="project" onclick="setMemType('project')">📁 项目状态</button>
+      </div>
       <div class="mem-note">
-        📖 记忆按顶部「🏰 项目」完全隔离——切到哪个项目，这里只显示那个项目的记忆（共享项目记忆库 + 本地记忆）。
-        任何 AI 接手任务前都应先查这里了解项目上下文；任务完成时工作记录会自动同步进来。
+        📖 记忆按顶部「🏰 项目」完全隔离——切到哪个项目，这里只显示那个项目的记忆（本地共享记忆库 + 软件记忆）。
+        默认按时间倒序（最近优先）；高 importance 记忆会出现在 ⭐ 重要记忆 区。任何 AI 接手任务前都应先查这里了解项目上下文。
       </div>
       <div class="mem-grid">
         <div class="panel">
-          <div class="panel-title">🌐 共享项目记忆库 <span class="mem-src-badge" id="memSharedBadge"></span></div>
+          <div class="panel-title">🌐 本地共享记忆库 <span class="mem-src-badge" id="memSharedBadge"></span></div>
+          <div id="memSharedStars" class="mem-stars"><div class="mem-empty">正在加载…</div></div>
           <div id="memSharedList" class="mem-list"><div class="mem-empty">正在加载…</div></div>
+          <div class="mem-more-wrap" id="memSharedMoreWrap" style="display:none"><button class="btn ghost" onclick="loadMoreMem('shared')">⬇️ 加载更多</button></div>
         </div>
         <div class="panel">
-          <div class="panel-title">🗂️ 本地记忆</div>
+          <div class="panel-title">🗂️ 软件记忆</div>
+          <div id="memLocalStars" class="mem-stars" style="display:none"></div>
           <div id="memLocalList" class="mem-list"><div class="mem-empty">正在加载…</div></div>
+          <div class="mem-more-wrap" id="memLocalMoreWrap" style="display:none"><button class="btn ghost" onclick="loadMoreMem('local')">⬇️ 加载更多</button></div>
         </div>
       </div>
     </main>
@@ -121,23 +149,50 @@
     <main class="view" id="viewRecruit" style="display:none">
       <div class="stats-title">📣 招募令 · 生成接入提示词</div>
       <div class="recruit-note">
-        🎯 把下面的提示词<strong>整段复制</strong>发给任意 AI（豆包 / Agnes / DeepSeek Harness / WorkBuddy），
-        它就知道如何加入冒险公会。会长负责规划派活，冒险者负责领活干活。
+        🎯 公会三级职责制：<strong>总会长</strong>管基础设施 → <strong>执事</strong>管项目 → <strong>冒险者</strong>执行。
+        把对应提示词<strong>整段复制</strong>发给任意 AI，它就知道自己的角色与规矩。
+      </div>
+      <div class="role-overview">
+        <div class="role-card role-chief">
+          <div class="role-icon">👑</div>
+          <div class="role-name">工会总会长</div>
+          <div class="role-core">管理整个公会基础设施：服务守护、任务池、软件记忆控制、项目分权、定时巡查</div>
+          <div class="role-tags"><span>基础设施</span><span>服务守护</span><span>记忆控制</span><span>项目分权</span></div>
+        </div>
+        <div class="role-card role-leader">
+          <div class="role-icon">🏛️</div>
+          <div class="role-name">执事</div>
+          <div class="role-core">管理指定项目：任务规划、派活、验收打分、项目内巡查、维护项目上下文</div>
+          <div class="role-tags"><span>只管理不执行</span><span>规划派活</span><span>验收打分</span><span>项目内巡查</span></div>
+        </div>
+        <div class="role-card role-worker">
+          <div class="role-icon">⚔️</div>
+          <div class="role-name">冒险者</div>
+          <div class="role-core">从任务池领活执行：领取任务、实现提交、归档工作记录</div>
+          <div class="role-tags"><span>领活执行</span><span>提交结果</span><span>经验金币</span><span>连击等级</span></div>
+        </div>
       </div>
       <div class="recruit-grid">
+        <div class="panel">
+          <div class="panel-title">👑 工会总会长上岗提示词
+            <button class="btn ghost recruit-copy" onclick="copyRecruit('chief')">📋 一键复制</button>
+          </div>
+          <div class="recruit-desc">发给要当公会总主脑的 AI——管理公会基础设施，不碰具体项目业务。</div>
+          <pre class="recruit-pre" id="recruitChief">加载中…</pre>
+        </div>
+        <div class="panel">
+          <div class="panel-title">🏛️ 执事上岗提示词
+            <button class="btn ghost recruit-copy" onclick="copyRecruit('leader')">📋 一键复制</button>
+          </div>
+          <div class="recruit-desc">发给要管理某个项目的 AI——只管理被指派项目，只管理不执行。</div>
+          <pre class="recruit-pre" id="recruitLeader">加载中…</pre>
+        </div>
         <div class="panel">
           <div class="panel-title">⚔️ 冒险者招募令
             <button class="btn ghost recruit-copy" onclick="copyRecruit('adventurer')">📋 一键复制</button>
           </div>
-          <div class="recruit-desc">发给想加入的 AI——它将成为冒险者，从任务池领活执行。</div>
+          <div class="recruit-desc">发给想加入的 AI——从任务池领活执行，难度越高奖励越多。</div>
           <pre class="recruit-pre" id="recruitAdventurer">加载中…</pre>
-        </div>
-        <div class="panel">
-          <div class="panel-title">👑 工会会长上岗提示词
-            <button class="btn ghost recruit-copy" onclick="copyRecruit('leader')">📋 一键复制</button>
-          </div>
-          <div class="recruit-desc">发给要当主脑的 AI——它将成为会长，规划派活、验收打分。</div>
-          <pre class="recruit-pre" id="recruitLeader">加载中…</pre>
         </div>
       </div>
     </main>
@@ -155,7 +210,7 @@
           <div id="dashTrend"></div>
         </div>
         <div class="panel">
-          <div class="panel-title">🛡️ 执行AI表现排行</div>
+          <div class="panel-title">⚔️ 冒险者排行榜</div>
           <div id="dashRanking"></div>
         </div>
         <div class="panel">
@@ -163,8 +218,25 @@
           <div id="dashMetrics"></div>
         </div>
         <div class="panel" style="grid-column: 1 / -1;">
+          <div class="panel-title">📊 完成报表 <span style="font-size:11px;color:var(--text-dim);font-weight:400;margin-left:8px">
+            <button class="trend-tab" data-gran="day" onclick="switchReportGran('day')">按天</button>
+            <button class="trend-tab" data-gran="week" onclick="switchReportGran('week')">按周</button>
+            <button class="trend-tab" data-gran="month" onclick="switchReportGran('month')">按月</button>
+            <span style="margin-left:12px">导出任务池：</span>
+            <a href="/api/export?format=csv" download><button>⬇ CSV</button></a>
+            <a href="/api/export?format=json" download><button>⬇ JSON</button></a>
+          </span></div>
+          <div id="dashReportTrend"></div>
+          <div style="margin-top:14px" id="dashAssignees"></div>
+        </div>
+        <div class="panel" style="grid-column: 1 / -1;">
           <div class="panel-title">🔍 巡查报告 / 后台动态 <span id="patrolTime" style="font-size:11px;color:var(--text-dim);font-weight:400;margin-left:8px"></span></div>
           <div id="dashPatrol"><div class="set-note">加载中…</div></div>
+        </div>
+        <div class="panel" style="grid-column: 1 / -1;">
+          <div class="panel-title">🧠 经验沉淀（最近决策）<span style="font-size:11px;color:var(--text-dim);font-weight:400;margin-left:8px">打回 / 重置 / 取消 / 评分 / 失败 自动写入本地共享记忆库</span></div>
+          <div id="dashDecisions"><div class="set-note">加载中…</div></div>
+        </div>
         <div class="panel" style="grid-column: 1 / -1;">
           <div class="panel-title">🏆 公会排行榜
             <span class="rank-toggle">
@@ -176,7 +248,7 @@
           <div id="guildRanking"><div class="set-note">加载中…</div></div>
         </div>
         </div>
-      </div>
+      
     </main>
 
     <!-- ========== 视图：设置 ========== -->
@@ -199,15 +271,34 @@
           <div class="panel-title">🧭 评分体系</div>
           <div id="setScoring"></div>
         </div>
-        <div class="panel">
-          <div class="panel-title">🤖 AI 项目管理（内置模型）</div>
-          <div id="setAi"></div>
+        <!-- opt-015: 项目管理面板（动态 CRUD，替代硬编码） -->
+        <div class="panel" style="grid-column: 1 / -1;">
+          <div class="panel-title" style="display:flex; justify-content:space-between; align-items:center;">
+            <span>📁 项目管理（项目前缀 → 看板分区）</span>
+            <span>
+              <button class="btn" style="margin-right:8px" onclick="loadProjects(true)">🔄 刷新</button>
+              <button class="btn primary" onclick="toggleAddProject()">＋ 新增项目</button>
+            </span>
+          </div>
+          <div id="projAddForm" style="display:none; margin-bottom:12px; padding:12px; border:1px dashed var(--line-soft,#e2e8f0); border-radius:8px;">
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+              <input type="text" id="npKey" placeholder="key（如 myproj）" style="width:130px" autocomplete="off">
+              <input type="text" id="npName" placeholder="名称（如 我的项目）" style="width:160px" autocomplete="off">
+              <input type="text" id="npPrefixes" placeholder="前缀，逗号分隔（如 myproj-,sub-）" style="width:260px" autocomplete="off">
+              <input type="text" id="npLeader" placeholder="负责人（可选）" style="width:130px" autocomplete="off">
+              <input type="number" id="npOrder" placeholder="排序" style="width:70px" value="50" autocomplete="off">
+              <button class="btn primary" onclick="addProject()">保存</button>
+              <button class="btn" onclick="toggleAddProject(false)">取消</button>
+            </div>
+          </div>
+          <div id="projPanel">加载中…</div>
         </div>
       </div>
       <div style="margin-top:20px; text-align:right;">
         <button class="btn primary" onclick="saveSettings()">💾 保存设置</button>
       </div>
     </main>
+  </div>
 
     <footer class="footer" id="footer"></footer>
   </div>
@@ -238,6 +329,15 @@
           <option value="2">高</option>
           <option value="1" selected>中</option>
           <option value="0">低</option>
+        </select>
+      </div>
+      <div><label>难度</label>
+        <select id="fDifficulty">
+          <option value="1">⭐ 1 简单</option>
+          <option value="2">⭐⭐ 2</option>
+          <option value="3" selected>⭐⭐⭐ 3 普通</option>
+          <option value="4">⭐⭐⭐⭐ 4</option>
+          <option value="5">⭐⭐⭐⭐⭐ 5 困难</option>
         </select>
       </div>
       <div><label>ID 前缀</label>
@@ -274,6 +374,50 @@
       <button class="primary" onclick="submitScore()">提交评分</button>
     </div>
     <div class="modal-hint" id="scoreHint">评分维度 1-4 分，总分 = 四维平均。提交后可再次修改覆盖。</div>
+  </div>
+</div>
+
+
+<!-- ========== 反馈提交面板（opt-031：收件箱已内嵌首页，弹窗保留提交功能） ========== -->
+<div class="modal-mask" id="feedbackMask" onclick="if(event.target===this)closeFeedback()">
+  <div class="modal fb-modal" onclick="event.stopPropagation()">
+    <h2>📬 提交反馈 <span class="fb-sub">写给你的执事/总会长（收件箱在首页看板中）</span></h2>
+    <div class="fb-form-grid">
+      <label>我是（反馈人）
+        <input id="fbFromWhom" placeholder="你的名字/代号" autocomplete="off">
+      </label>
+      <label>我的角色
+        <select id="fbFromRole">
+          <option value="adventurer">⚔️ 冒险者</option>
+          <option value="leader">🏛️ 执事</option>
+          <option value="chief">👑 总会长</option>
+        </select>
+      </label>
+      <label>反馈对象
+        <select id="fbToWhom"></select>
+      </label>
+      <label>分类
+        <select id="fbCategory">
+          <option value="bug">🐞 bug</option>
+          <option value="建议">💡 建议</option>
+          <option value="问题">❓ 问题</option>
+          <option value="汇报">📊 汇报</option>
+          <option value="通知">📢 通知</option>
+          <option value="其他">📌 其他</option>
+        </select>
+      </label>
+    </div>
+    <label>关联任务（可选，输入任务 ID）
+      <input id="fbTaskId" placeholder="如 opt-031（可空）" autocomplete="off">
+    </label>
+    <label>反馈内容
+      <textarea id="fbContent" rows="4" placeholder="描述问题/建议/汇报内容……"></textarea>
+    </label>
+    <div class="fb-hint">也可以直接在任务 complete 的 result 里写【反馈】标记，会随任务归档沉淀。</div>
+    <div class="modal-actions">
+      <button onclick="closeFeedback()">取消</button>
+      <button class="primary" onclick="submitFeedback()">📤 提交反馈</button>
+    </div>
   </div>
 </div>
 

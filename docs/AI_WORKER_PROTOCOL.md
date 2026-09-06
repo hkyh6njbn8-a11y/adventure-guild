@@ -4,13 +4,13 @@
 
 ## 一、核心概念
 
-- **任务状态**：`pending`（待领取）→ `in_progress`（进行中）→ `completed`（已完成）或 `failed`（失败）
+- **任务状态**：`pending`（待领取）→ `in_progress`（进行中）→ `review`（待审查）→ `completed`（已完成）或 `failed`（失败）；`cancelled`（已取消）为终止态（pending/in_progress/review/failed 均可取消，completed 不可取消）
 - **执行者身份**：每个 AI 工人用 `assignee` 字符串标识自己，命名规范为「工具名 (模型名)」，如 `WorkBuddy (GLM-5.3-Flash)`
 - **工作区**：可选，用于隔离不同项目的任务池
 
 ## 二、HTTP API（推荐）
 
-所有请求返回 JSON，基础地址 `http://127.0.0.1:8765`。
+所有请求返回 JSON，基础地址 `http://127.0.0.1:8767`（默认端口 8765，以实际运行端口为准）。
 
 ### 2.1 获取待领取任务
 
